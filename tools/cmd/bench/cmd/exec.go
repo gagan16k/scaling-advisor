@@ -15,8 +15,10 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"sync"
 	"syscall"
 	"text/template"
+	"time"
 
 	svcapi "github.com/gardener/scaling-advisor/api/service"
 	"github.com/gardener/scaling-advisor/common/nodeutil"
@@ -35,9 +37,15 @@ import (
 var content embed.FS
 
 var (
-	skipCleanup  bool
-	snapshotFile string
+	skipCleanup       bool
+	snapshotFile      string
+	monitoringEnabled bool
+	monitorInterval   time.Duration
+	scalerPodName     string
+	scalerNamespace   string
 )
+
+var PrometheusPort = 2112
 
 func init() {
 	rootCmd.AddCommand(execCmd)
@@ -54,6 +62,34 @@ func init() {
 		"skip-cleanup", "s",
 		false,
 		"delete cluster with all data upon finishing",
+	)
+
+	execCmd.PersistentFlags().BoolVarP(
+		&monitoringEnabled,
+		"monitor", "m",
+		false,
+		"enable monitoring of scaler CPU and Memory consumption",
+	)
+
+	execCmd.PersistentFlags().DurationVar(
+		&monitorInterval,
+		"monitor-interval",
+		100*time.Millisecond,
+		"interval for collecting metrics",
+	)
+
+	execCmd.PersistentFlags().StringVar(
+		&scalerPodName,
+		"scaler-pod",
+		"cluster-autoscaler",
+		"name of the scaler pod to monitor",
+	)
+
+	execCmd.PersistentFlags().StringVar(
+		&scalerNamespace,
+		"scaler-namespace",
+		"kube-system",
+		"namespace of the scaler pod",
 	)
 }
 
@@ -74,6 +110,7 @@ type KwokCfgTmplParams struct {
 	KubeSchedulerConfigPath string
 	OutputPath              string
 	// Scaler Image?
+	PrometheusConfigPath string
 }
 
 // REF: https://medium.com/programming-kubernetes/testing-kubernetes-controllers-with-the-e2e-framework-fac232843dc6
@@ -93,11 +130,19 @@ func setupTestEnv() error {
 	defer os.Remove(kubeSchedulerConfigPath)
 
 	outputFile := path.Join(os.TempDir(), "kwok-config.yaml")
+
+	promConfigPath, err := writePrometheusConfig(PrometheusPort)
+	if err != nil {
+		return fmt.Errorf("could not write prometheus config: %w", err)
+	}
+	defer os.Remove(promConfigPath)
+
 	kwokCfgTmplParams := KwokCfgTmplParams{
 		HomeDir:                 os.Getenv("HOME"),
 		ClusterName:             kwokClusterName,
 		KubeSchedulerConfigPath: kubeSchedulerConfigPath,
 		OutputPath:              outputFile,
+		PrometheusConfigPath:    promConfigPath,
 	}
 
 	err = generateKwokConfig(kwokCfgTmplParams, "templates/kwok-config-tmpl.yaml")
@@ -117,15 +162,15 @@ func setupTestEnv() error {
 		pwd, _ := os.Getwd()
 		logsDir := path.Join(pwd, "./logs", "kwok-"+kwokClusterName)
 
-		notEmpty, _ := isDirNonEmpty(logsDir)
-		if notEmpty {
-			err := os.RemoveAll(logsDir)
-			if err != nil {
-				fmt.Println("Error:", err)
-				return
-			}
-			// fmt.Printf("Directory %q deleted successfully\n", logsDir)
-		}
+		// notEmpty, _ := isDirNonEmpty(logsDir)
+		// if notEmpty {
+		// 	err := os.RemoveAll(logsDir)
+		// 	if err != nil {
+		// 		fmt.Println("Error:", err)
+		// 		return
+		// 	}
+		// fmt.Printf("Directory %q deleted successfully\n", logsDir)
+		// }
 
 		exportLogsFunc := envfuncs.ExportClusterLogs(kwokClusterName, "./logs")
 		if _, err := exportLogsFunc(ctx, cfg); err != nil {
@@ -142,7 +187,7 @@ func setupTestEnv() error {
 		}
 	}()
 
-	if err := runKwokCluster(ctx, cfg, snapshotFile); err != nil {
+	if err := runKwokCluster(ctx, cfg, snapshotFile, kwokClusterName); err != nil {
 		return fmt.Errorf("Error running KWOK cluster test: %v", err)
 	}
 	log.Println("Successfully completed!")
@@ -151,7 +196,7 @@ func setupTestEnv() error {
 	return nil
 }
 
-func runKwokCluster(ctx context.Context, cfg *envconf.Config, snapshotFile string) error {
+func runKwokCluster(ctx context.Context, cfg *envconf.Config, snapshotFile, clusterName string) error {
 	file, err := os.Open(snapshotFile)
 	if err != nil {
 		return fmt.Errorf("Could not open the clusterSnapshot file %q: %v", snapshotFile, err)
@@ -203,6 +248,11 @@ func runKwokCluster(ctx context.Context, cfg *envconf.Config, snapshotFile strin
 	err = deployPods(ctx, clusterSnapshot, cfg)
 	if err != nil {
 		return err
+	}
+
+	// Start monitoring if enabled
+	if err := monitorScaler(ctx, cfg, clusterName); err != nil {
+		log.Printf("Warning: Monitoring failed: %v", err)
 	}
 
 	return nil
@@ -425,4 +475,98 @@ func writeEmbeddedKubeSchedulerConfig() (string, error) {
 	}
 
 	return tempFile.Name(), nil
+}
+
+func monitorScaler(ctx context.Context, cfg *envconf.Config, clusterName string) error {
+	log.Printf("Starting monitoring for scaler docker container %s-control-plane...\n", scalerPodName)
+
+	mon := NewDockerMonitor(scalerPodName, monitorInterval)
+
+	log.Println("Waiting for scaler container to be ready...")
+	if err := mon.WaitForReady(ctx); err != nil {
+		return fmt.Errorf("scaler container %q did not become ready: %w", scalerPodName, err)
+	}
+	log.Println("Scaler container is ready")
+
+	// Start Prometheus metrics server
+	go func() {
+		if err := ServeMetrics(PrometheusPort); err != nil {
+			log.Printf("Failed to serve metrics: %v", err)
+		}
+	}()
+
+	metricsChan := make(chan PodMetrics, 100)
+
+	// consumer goroutine to handle file writing and Prometheus metrics
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		filePath := path.Join("./logs", "kwok-"+clusterName, "scaler-metrics.json")
+		if err := os.MkdirAll(path.Dir(filePath), 0755); err != nil {
+			log.Printf("Failed to create logs directory: %v\n", err)
+			return
+		}
+
+		file, err := os.Create(filePath)
+		if err != nil {
+			log.Printf("Failed to create metrics file: %v\n", err)
+			return
+		}
+		defer file.Close()
+
+		file.WriteString("[\n")
+		first := true
+		for m := range metricsChan {
+			if !first {
+				file.WriteString(",\n")
+			}
+			b, _ := json.MarshalIndent(m, "  ", "  ")
+			file.Write(b)
+			first = false
+
+			for _, container := range m.Containers {
+				cpu := container.Usage[corev1.ResourceCPU]
+				mem := container.Usage[corev1.ResourceMemory]
+				ScalerCPUUsage.WithLabelValues(container.Name).Set(float64(cpu.MilliValue()))
+				ScalerMemoryUsage.WithLabelValues(container.Name).Set(float64(mem.Value()) / (1024 * 1024))
+			}
+		}
+		file.WriteString("\n]\n")
+		log.Printf("Finished writing metrics to %s\n", filePath)
+	})
+
+	// producer goroutine to Stream metrics
+	wg.Go(func() {
+		defer close(metricsChan)
+		if err := mon.StreamMetrics(ctx, metricsChan); err != nil {
+			log.Printf("Error collecting metrics: %v", err)
+		}
+	})
+
+	log.Println("Measuring time to produce recommendation...")
+
+	startTime := time.Now()
+
+	recommendationCondition := func() (bool, error) {
+		pods := &corev1.PodList{}
+		if err := cfg.Client().Resources().List(ctx, pods); err != nil {
+			return false, err
+		}
+		for _, pod := range pods.Items {
+			if pod.Spec.NodeName == "" {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+
+	duration, err := MeasureRecommendationTime(ctx, startTime, recommendationCondition)
+	if err != nil {
+		log.Printf("Failed to measure recommendation time: %v", err)
+	} else {
+		log.Printf("Recommendation produced in: %v\n", duration)
+	}
+
+	// Wait
+	wg.Wait()
+	return nil
 }

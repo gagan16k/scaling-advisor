@@ -6,6 +6,7 @@ require (
 	github.com/gardener/scaling-advisor/api v0.0.0
 	github.com/gardener/scaling-advisor/common v0.0.0
 	github.com/gardener/scaling-advisor/minkapi v0.0.0
+	github.com/prometheus/client_golang v1.22.0
 	github.com/spf13/cobra v1.10.1
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1
@@ -60,7 +61,6 @@ require (
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_golang v1.22.0 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect

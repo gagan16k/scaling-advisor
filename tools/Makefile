@@ -74,3 +74,8 @@ check: $(GOLANGCI_LINT) format
 .PHONY: run
 run: build
 	bin/${binary_name}
+
+## cleanup-kwok: cleanup all kwok containers
+.PHONY: cleanup-kwok
+cleanup-kwok:
+	@docker ps -a --filter "name=kwok-kwok" --format "{{.ID}}" | xargs -r docker rm -f

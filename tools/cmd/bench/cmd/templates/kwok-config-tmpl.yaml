@@ -45,3 +45,14 @@ components:
         readOnly: true
     networks:
       - kwok-{{.ClusterName}}
+  - name: prometheus
+    image: prom/prometheus:latest
+    ports:
+      - port: 9090
+        hostPort: 9090
+    volumes:
+      - hostPath: {{.PrometheusConfigPath}}
+        mountPath: /etc/prometheus/prometheus.yml
+        readOnly: true
+    networks:
+      - kwok-{{.ClusterName}}
