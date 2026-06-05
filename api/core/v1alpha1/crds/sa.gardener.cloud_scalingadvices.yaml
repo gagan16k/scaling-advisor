@@ -155,7 +155,6 @@ spec:
                 type: object
             required:
             - constraintRef
-            - scaleInPlan
             type: object
           status:
             description: Status defines the status of ScalingAdvice.

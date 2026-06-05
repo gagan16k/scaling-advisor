@@ -1,0 +1,7 @@
+apiVersion: config.sa.gardener.cloud/v1alpha1
+kind: OperatorConfig
+clientConnection:
+  kubeConfigPath: ./scenarios/kubeconfig.yaml
+controllers:
+  scalingAdvice:
+    requeueAfter: 10s

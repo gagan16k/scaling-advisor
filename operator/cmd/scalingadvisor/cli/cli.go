@@ -48,6 +48,7 @@ func (o *LaunchOptions) LoadAndValidateOperatorConfig() (*configv1alpha1.Operato
 		return nil, err
 	}
 	configv1alpha1.SetDefaults_ScalingAdvisorServerConfiguration(&operatorConfig.Server)
+	configv1alpha1.SetDefaults_ScalingAdviceControllerConfiguration(&operatorConfig.Controllers.ScalingAdvice)
 	if errs := configv1alpha1validation.ValidateScalingAdvisorConfiguration(operatorConfig); len(errs) > 0 {
 		return nil, errs.ToAggregate()
 	}

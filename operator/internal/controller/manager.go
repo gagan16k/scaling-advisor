@@ -5,7 +5,7 @@
 package controller
 
 import (
-	"github.com/gardener/scaling-advisor/operator/internal/controller/scalingconstraints"
+	"github.com/gardener/scaling-advisor/operator/internal/controller/advisor"
 
 	commonconstants "github.com/gardener/scaling-advisor/api/common/constants"
 	configv1alpha1 "github.com/gardener/scaling-advisor/api/config/v1alpha1"
@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
@@ -26,7 +27,11 @@ func CreateManagerAndRegisterControllers(log logr.Logger, saCfg *configv1alpha1.
 	if err != nil {
 		return nil, err
 	}
-	mgr, err := ctrl.NewManager(getRestConfig(saCfg), mgrOpts)
+	restCfg, err := getRestConfig(saCfg)
+	if err != nil {
+		return nil, err
+	}
+	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -65,15 +70,31 @@ func createManagerOptions(log logr.Logger, saCfg *configv1alpha1.OperatorConfig)
 	return opts, nil
 }
 
-func getRestConfig(operatorCfg *configv1alpha1.OperatorConfig) *rest.Config {
-	restCfg := ctrl.GetConfigOrDie()
+func getRestConfig(operatorCfg *configv1alpha1.OperatorConfig) (*rest.Config, error) {
+	var (
+		restCfg *rest.Config
+		err     error
+	)
+	// Honor explicit kubeconfig path; otherwise fall back to controller-runtime defaults
+	// (KUBECONFIG, ~/.kube/config, in-cluster).
+	if operatorCfg != nil && operatorCfg.ClientConnection.KubeConfigPath != "" {
+		restCfg, err = clientcmd.BuildConfigFromFlags("", operatorCfg.ClientConnection.KubeConfigPath)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		restCfg, err = ctrl.GetConfig()
+		if err != nil {
+			return nil, err
+		}
+	}
 	if operatorCfg != nil {
 		restCfg.Burst = operatorCfg.ClientConnection.Burst
 		restCfg.QPS = operatorCfg.ClientConnection.QPS
 		restCfg.AcceptContentTypes = operatorCfg.ClientConnection.AcceptContentTypes
 		restCfg.ContentType = operatorCfg.ClientConnection.ContentType
 	}
-	return restCfg
+	return restCfg, nil
 }
 
 func createScalingAdvisorScheme() (*runtime.Scheme, error) {
@@ -90,6 +111,10 @@ func createScalingAdvisorScheme() (*runtime.Scheme, error) {
 }
 
 func registerControllers(mgr ctrl.Manager, controllersConfig configv1alpha1.ControllersConfig) error {
-	scalingConstraintsController := scalingconstraints.NewReconciler(mgr, controllersConfig.ScalingConstraints)
-	return scalingConstraintsController.SetupWithManager(mgr)
+	log := mgr.GetLogger().WithName("advisor")
+	csBuilder := advisor.NewClusterSnapshotBuilder(mgr.GetCache(), log.WithName("cs-builder"))
+	if err := mgr.Add(csBuilder); err != nil {
+		return err
+	}
+	return advisor.NewReconciler(mgr, controllersConfig.ScalingAdvice, csBuilder).SetupWithManager(mgr)
 }

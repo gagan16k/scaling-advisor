@@ -64,9 +64,9 @@ func SetDefaults_ScalingAdvisorServerConfiguration(serverConfig *ScalingAdvisorS
 	}
 }
 
-// SetDefaults_ScalingConstraintsControllerConfiguration sets defaults for the ScalingConstraintsControllerConfig.
-func SetDefaults_ScalingConstraintsControllerConfiguration(scalingConstraintsConfig *ScalingConstraintsControllerConfig) {
-	if scalingConstraintsConfig.ConcurrentSyncs <= 0 {
-		scalingConstraintsConfig.ConcurrentSyncs = defaultConcurrentSyncs
+// SetDefaults_ScalingAdviceControllerConfiguration sets defaults for the ScalingAdviceControllerConfig.
+func SetDefaults_ScalingAdviceControllerConfiguration(scalingAdviceConfig *ScalingAdviceControllerConfig) {
+	if scalingAdviceConfig.RequeueAfter.Duration <= 0 {
+		scalingAdviceConfig.RequeueAfter = metav1.Duration{Duration: 30 * time.Second}
 	}
 }

@@ -35,3 +35,6 @@ gosec-report.sarif
 # hack tools binaries and generated configurations
 **/bin/
 gen/
+
+# downloaded gardener kubeconfigs (operator/scenarios/scripts/get-kubeconfig.sh)
+operator/scenarios/kubeconfig*.yaml
