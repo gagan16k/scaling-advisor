@@ -23,8 +23,10 @@ type OperatorConfig struct {
 	AdviceGeneration ScalingAdviceGenerationConfig
 	// CloudProvider specifies the cloud provider for which the scaling advisor is configured.
 	CloudProvider commontypes.CloudProvider `json:"cloudProvider"`
-	// ClientConnection defines the configuration for constructing a kube client.
-	ClientConnection ClientConnectionConfig `json:"clientConnection"`
+	// ControlPlaneClientConnection defines the configuration for constructing a kube client for the control plane.
+	ControlPlaneClientConnection ClientConnectionConfig `json:"controlPlaneClientConnection"`
+	// DataPlaneClientConnection defines the configuration for constructing a kube client for the data plane.
+	DataPlaneClientConnection ClientConnectionConfig `json:"dataPlaneClientConnection"`
 	// LeaderElection defines the configuration for leader election.
 	LeaderElection LeaderElectionConfig `json:"leaderElection"`
 	// Controllers defines the configuration for controllers.

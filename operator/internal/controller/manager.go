@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	ctrlmetricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
@@ -27,15 +28,31 @@ func CreateManagerAndRegisterControllers(log logr.Logger, saCfg *configv1alpha1.
 	if err != nil {
 		return nil, err
 	}
-	restCfg, err := getRestConfig(saCfg)
+
+	controlPlaneRestCfg, err := getControlPlaneRestConfig(saCfg)
 	if err != nil {
 		return nil, err
 	}
-	mgr, err := ctrl.NewManager(restCfg, mgrOpts)
+	dataPlaneRestCfg, err := getDataPlaneRestConfig(saCfg)
 	if err != nil {
 		return nil, err
 	}
-	if err = registerControllers(mgr, saCfg.Controllers); err != nil {
+
+	mgr, err := ctrl.NewManager(controlPlaneRestCfg, mgrOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a separate cache for the data plane cluster and add it to the manager, so it gets started and stopped together with the manager.
+	dataPlaneCache, err := cache.New(dataPlaneRestCfg, cache.Options{Scheme: mgr.GetScheme()})
+	if err != nil {
+		return nil, err
+	}
+	if err = mgr.Add(dataPlaneCache); err != nil {
+		return nil, err
+	}
+
+	if err = registerControllers(mgr, saCfg.Controllers, dataPlaneCache); err != nil {
 		return nil, err
 	}
 	return mgr, nil
@@ -70,31 +87,40 @@ func createManagerOptions(log logr.Logger, saCfg *configv1alpha1.OperatorConfig)
 	return opts, nil
 }
 
-func getRestConfig(operatorCfg *configv1alpha1.OperatorConfig) (*rest.Config, error) {
+func getControlPlaneRestConfig(cfg *configv1alpha1.OperatorConfig) (*rest.Config, error) {
 	var (
 		restCfg *rest.Config
 		err     error
 	)
-	// Honor explicit kubeconfig path; otherwise fall back to controller-runtime defaults
-	// (KUBECONFIG, ~/.kube/config, in-cluster).
-	if operatorCfg != nil && operatorCfg.ClientConnection.KubeConfigPath != "" {
-		restCfg, err = clientcmd.BuildConfigFromFlags("", operatorCfg.ClientConnection.KubeConfigPath)
-		if err != nil {
-			return nil, err
-		}
+	if cfg != nil && cfg.ControlPlaneClientConnection.KubeConfigPath != "" {
+		restCfg, err = clientcmd.BuildConfigFromFlags("", cfg.ControlPlaneClientConnection.KubeConfigPath)
 	} else {
-		restCfg, err = ctrl.GetConfig()
-		if err != nil {
-			return nil, err
-		}
+		restCfg, err = ctrl.GetConfig() // in-cluster fallback
 	}
-	if operatorCfg != nil {
-		restCfg.Burst = operatorCfg.ClientConnection.Burst
-		restCfg.QPS = operatorCfg.ClientConnection.QPS
-		restCfg.AcceptContentTypes = operatorCfg.ClientConnection.AcceptContentTypes
-		restCfg.ContentType = operatorCfg.ClientConnection.ContentType
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil {
+		applyClientConnectionSettings(restCfg, cfg.ControlPlaneClientConnection)
 	}
 	return restCfg, nil
+}
+
+func getDataPlaneRestConfig(cfg *configv1alpha1.OperatorConfig) (*rest.Config, error) {
+	// KubeConfigPath is guaranteed non-empty by validation
+	restCfg, err := clientcmd.BuildConfigFromFlags("", cfg.DataPlaneClientConnection.KubeConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	applyClientConnectionSettings(restCfg, cfg.DataPlaneClientConnection)
+	return restCfg, nil
+}
+
+func applyClientConnectionSettings(restCfg *rest.Config, conn configv1alpha1.ClientConnectionConfig) {
+	restCfg.Burst = conn.Burst
+	restCfg.QPS = conn.QPS
+	restCfg.AcceptContentTypes = conn.AcceptContentTypes
+	restCfg.ContentType = conn.ContentType
 }
 
 func createScalingAdvisorScheme() (*runtime.Scheme, error) {
@@ -110,9 +136,9 @@ func createScalingAdvisorScheme() (*runtime.Scheme, error) {
 	return scheme, nil
 }
 
-func registerControllers(mgr ctrl.Manager, controllersConfig configv1alpha1.ControllersConfig) error {
+func registerControllers(mgr ctrl.Manager, controllersConfig configv1alpha1.ControllersConfig, dpCache cache.Cache) error {
 	log := mgr.GetLogger().WithName("advisor")
-	csBuilder := advisor.NewClusterSnapshotBuilder(mgr.GetCache(), log.WithName("cs-builder"))
+	csBuilder := advisor.NewClusterSnapshotBuilder(dpCache, log.WithName("cs-builder"))
 	if err := mgr.Add(csBuilder); err != nil {
 		return err
 	}

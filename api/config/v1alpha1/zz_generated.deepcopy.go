@@ -70,7 +70,8 @@ func (in *OperatorConfig) DeepCopyInto(out *OperatorConfig) {
 	out.TypeMeta = in.TypeMeta
 	out.Server = in.Server
 	out.AdviceGeneration = in.AdviceGeneration
-	out.ClientConnection = in.ClientConnection
+	out.ControlPlaneClientConnection = in.ControlPlaneClientConnection
+	out.DataPlaneClientConnection = in.DataPlaneClientConnection
 	out.LeaderElection = in.LeaderElection
 	out.Controllers = in.Controllers
 	return

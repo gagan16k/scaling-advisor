@@ -5,6 +5,8 @@
 package validation
 
 import (
+	"strings"
+
 	configv1apha1 "github.com/gardener/scaling-advisor/api/config/v1alpha1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,9 +16,18 @@ import (
 // ValidateScalingAdvisorConfiguration validates the OperatorConfig.
 func ValidateScalingAdvisorConfiguration(config *configv1apha1.OperatorConfig) field.ErrorList {
 	allErrs := field.ErrorList{}
-	allErrs = append(allErrs, validateClientConnectionConfiguration(config.ClientConnection, field.NewPath("clientConnection"))...)
+	allErrs = append(allErrs, validateClientConnectionConfiguration(config.ControlPlaneClientConnection, field.NewPath("controlPlaneClientConnection"))...)
+	allErrs = append(allErrs, validateDataPlaneClientConnection(config.DataPlaneClientConnection, field.NewPath("dataPlaneClientConnection"))...)
 	allErrs = append(allErrs, validateLeaderElectionConfiguration(config.LeaderElection, field.NewPath("leaderElection"))...)
 	// TODO add validation here.
+	return allErrs
+}
+
+func validateDataPlaneClientConnection(config configv1apha1.ClientConnectionConfig, fldPath *field.Path) field.ErrorList {
+	allErrs := validateClientConnectionConfiguration(config, fldPath)
+	if strings.TrimSpace(config.KubeConfigPath) == "" {
+		allErrs = append(allErrs, field.Required(fldPath.Child("kubeConfigPath"), "data plane kubeconfig path must be specified"))
+	}
 	return allErrs
 }
 
