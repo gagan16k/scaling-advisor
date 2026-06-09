@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package advisor
+package clusterstate
 
 import (
 	"context"
@@ -29,25 +29,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// ErrSnapshotNotSynced is returned by Snapshot when the builder has not yet  completed its initial cache sync.
-var ErrSnapshotNotSynced = errors.New("cluster snapshot not synced")
+// ErrNotSynced is returned by Snapshot when the builder has not yet completed its initial cache sync.
+var ErrNotSynced = errors.New("cluster snapshot not synced")
 
-// ClusterSnapshotBuilder owns shared informers for the seven object kinds the planner cares about
+// ClusterStateTracker owns shared informers for the seven object kinds the planner cares about
 // (pods / nodes / PVs / PVCs / storage classes / priority classes / runtime classes) and keeps an
 // in-memory projection updated on watch events. Snapshot() returns the current projection for
 // planner consumption; the builder does not drive reconcile triggers.
-type ClusterSnapshotBuilder struct {
+type ClusterStateTracker struct {
 	log    logr.Logger
 	cache  cache.Cache
 	state  *clusterState
 	synced atomic.Bool
 }
 
-var _ manager.Runnable = (*ClusterSnapshotBuilder)(nil)
+var _ manager.Runnable = (*ClusterStateTracker)(nil)
 
-// NewClusterSnapshotBuilder returns a builder backed by the given manager cache.
-func NewClusterSnapshotBuilder(c cache.Cache, log logr.Logger) *ClusterSnapshotBuilder {
-	return &ClusterSnapshotBuilder{
+// NewClusterStateTracker returns a ClusterStateTracker backed by the given manager cache.
+func NewClusterStateTracker(c cache.Cache, log logr.Logger) *ClusterStateTracker {
+	return &ClusterStateTracker{
 		log:   log,
 		cache: c,
 		state: newClusterState(),
@@ -55,22 +55,22 @@ func NewClusterSnapshotBuilder(c cache.Cache, log logr.Logger) *ClusterSnapshotB
 }
 
 // NeedLeaderElection returns false: every replica must keep its own live snapshot.
-func (b *ClusterSnapshotBuilder) NeedLeaderElection() bool {
+func (b *ClusterStateTracker) NeedLeaderElection() bool {
 	return false
 }
 
-func (b *ClusterSnapshotBuilder) Snapshot() (planner.ClusterSnapshot, error) {
+func (b *ClusterStateTracker) Snapshot() (planner.ClusterSnapshot, error) {
 	if !b.synced.Load() {
-		return planner.ClusterSnapshot{}, ErrSnapshotNotSynced
+		return planner.ClusterSnapshot{}, ErrNotSynced
 	}
 	return b.state.snapshot(), nil
 }
 
 // Start registers per-type handlers on each watched informer, waits for cache sync, and blocks
 // until ctx is cancelled.
-func (b *ClusterSnapshotBuilder) Start(ctx context.Context) error {
-	b.log.Info("cluster snapshot builder starting")
-	defer b.log.Info("cluster snapshot builder stopped")
+func (b *ClusterStateTracker) Start(ctx context.Context) error {
+	b.log.Info("cluster state tracker starting")
+	defer b.log.Info("cluster state tracker stopped")
 
 	type watch struct {
 		obj     client.Object
@@ -91,23 +91,23 @@ func (b *ClusterSnapshotBuilder) Start(ctx context.Context) error {
 		}
 	}
 	if !b.cache.WaitForCacheSync(ctx) {
-		return fmt.Errorf("cluster snapshot builder: cache sync did not complete")
+		return fmt.Errorf("cluster state tracker: cache sync did not complete")
 	}
 	b.synced.Store(true)
-	b.log.V(2).Info("cluster snapshot builder ready", "watchedKinds", len(watches))
+	b.log.V(2).Info("cluster state tracker ready", "watchedKinds", len(watches))
 
 	<-ctx.Done()
 	return nil
 }
 
 // registerHandler attaches h to the informer for obj.
-func (b *ClusterSnapshotBuilder) registerHandler(ctx context.Context, obj client.Object, h toolscache.ResourceEventHandler) error {
+func (b *ClusterStateTracker) registerHandler(ctx context.Context, obj client.Object, h toolscache.ResourceEventHandler) error {
 	informer, err := b.cache.GetInformer(ctx, obj)
 	if err != nil {
-		return fmt.Errorf("cluster snapshot builder: get informer for %T: %w", obj, err)
+		return fmt.Errorf("cluster state tracker: get informer for %T: %w", obj, err)
 	}
 	if _, err := informer.AddEventHandler(h); err != nil {
-		return fmt.Errorf("cluster snapshot builder: add event handler for %T: %w", obj, err)
+		return fmt.Errorf("cluster state tracker: add event handler for %T: %w", obj, err)
 	}
 	return nil
 }
@@ -117,7 +117,7 @@ func (b *ClusterSnapshotBuilder) registerHandler(ctx context.Context, obj client
 // it via common/* helpers, and mutates clusterState.
 // ---------------------------------------------------------------------------
 
-func (b *ClusterSnapshotBuilder) podHandler() toolscache.ResourceEventHandler {
+func (b *ClusterStateTracker) podHandler() toolscache.ResourceEventHandler {
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			pod, ok := obj.(*corev1.Pod)
@@ -149,7 +149,7 @@ func (b *ClusterSnapshotBuilder) podHandler() toolscache.ResourceEventHandler {
 	}
 }
 
-func (b *ClusterSnapshotBuilder) nodeHandler() toolscache.ResourceEventHandler {
+func (b *ClusterStateTracker) nodeHandler() toolscache.ResourceEventHandler {
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			node, ok := obj.(*corev1.Node)
@@ -181,7 +181,7 @@ func (b *ClusterSnapshotBuilder) nodeHandler() toolscache.ResourceEventHandler {
 	}
 }
 
-func (b *ClusterSnapshotBuilder) pvHandler() toolscache.ResourceEventHandler {
+func (b *ClusterStateTracker) pvHandler() toolscache.ResourceEventHandler {
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			pv, ok := obj.(*corev1.PersistentVolume)
@@ -222,7 +222,7 @@ func (b *ClusterSnapshotBuilder) pvHandler() toolscache.ResourceEventHandler {
 	}
 }
 
-func (b *ClusterSnapshotBuilder) pvcHandler() toolscache.ResourceEventHandler {
+func (b *ClusterStateTracker) pvcHandler() toolscache.ResourceEventHandler {
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			pvc, ok := obj.(*corev1.PersistentVolumeClaim)
@@ -254,7 +254,7 @@ func (b *ClusterSnapshotBuilder) pvcHandler() toolscache.ResourceEventHandler {
 	}
 }
 
-func (b *ClusterSnapshotBuilder) storageClassHandler() toolscache.ResourceEventHandler {
+func (b *ClusterStateTracker) storageClassHandler() toolscache.ResourceEventHandler {
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			sc, ok := obj.(*storagev1.StorageClass)
@@ -286,7 +286,7 @@ func (b *ClusterSnapshotBuilder) storageClassHandler() toolscache.ResourceEventH
 	}
 }
 
-func (b *ClusterSnapshotBuilder) priorityClassHandler() toolscache.ResourceEventHandler {
+func (b *ClusterStateTracker) priorityClassHandler() toolscache.ResourceEventHandler {
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			pc, ok := obj.(*schedulingv1.PriorityClass)
@@ -318,7 +318,7 @@ func (b *ClusterSnapshotBuilder) priorityClassHandler() toolscache.ResourceEvent
 	}
 }
 
-func (b *ClusterSnapshotBuilder) runtimeClassHandler() toolscache.ResourceEventHandler {
+func (b *ClusterStateTracker) runtimeClassHandler() toolscache.ResourceEventHandler {
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			rc, ok := obj.(*nodev1.RuntimeClass)

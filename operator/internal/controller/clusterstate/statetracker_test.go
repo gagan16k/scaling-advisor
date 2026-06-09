@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package advisor
+package clusterstate
 
 import (
 	"errors"
@@ -16,8 +16,8 @@ import (
 	toolscache "k8s.io/client-go/tools/cache"
 )
 
-func newTestBuilder() *ClusterSnapshotBuilder {
-	b := &ClusterSnapshotBuilder{
+func newTestBuilder() *ClusterStateTracker {
+	b := &ClusterStateTracker{
 		log:   logr.Discard(),
 		state: newClusterState(),
 	}
@@ -25,7 +25,7 @@ func newTestBuilder() *ClusterSnapshotBuilder {
 	return b
 }
 
-func mustSnapshot(t *testing.T, b *ClusterSnapshotBuilder) planner.ClusterSnapshot {
+func mustSnapshot(t *testing.T, b *ClusterStateTracker) planner.ClusterSnapshot {
 	t.Helper()
 	snap, err := b.Snapshot()
 	if err != nil {
@@ -238,11 +238,11 @@ func TestBuildIndependence(t *testing.T) {
 }
 
 func TestSnapshotNotSyncedReturnsError(t *testing.T) {
-	b := &ClusterSnapshotBuilder{
+	b := &ClusterStateTracker{
 		log:   logr.Discard(),
 		state: newClusterState(),
 	}
-	if _, err := b.Snapshot(); !errors.Is(err, ErrSnapshotNotSynced) {
-		t.Errorf("Snapshot() error = %v, want ErrSnapshotNotSynced", err)
+	if _, err := b.Snapshot(); !errors.Is(err, ErrNotSynced) {
+		t.Errorf("Snapshot() error = %v, want ErrNotSynced", err)
 	}
 }

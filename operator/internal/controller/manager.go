@@ -6,6 +6,7 @@ package controller
 
 import (
 	"github.com/gardener/scaling-advisor/operator/internal/controller/advisor"
+	"github.com/gardener/scaling-advisor/operator/internal/controller/clusterstate"
 
 	commonconstants "github.com/gardener/scaling-advisor/api/common/constants"
 	configv1alpha1 "github.com/gardener/scaling-advisor/api/config/v1alpha1"
@@ -112,7 +113,7 @@ func createScalingAdvisorScheme() (*runtime.Scheme, error) {
 
 func registerControllers(mgr ctrl.Manager, opCfg *configv1alpha1.OperatorConfig) error {
 	log := mgr.GetLogger().WithName("advisor")
-	csBuilder := advisor.NewClusterSnapshotBuilder(mgr.GetCache(), log.WithName("cs-builder"))
+	csBuilder := clusterstate.NewClusterStateTracker(mgr.GetCache(), log.WithName("cs-tracker"))
 	if err := mgr.Add(csBuilder); err != nil {
 		return err
 	}

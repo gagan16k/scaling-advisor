@@ -11,6 +11,7 @@ import (
 
 	configv1alpha1 "github.com/gardener/scaling-advisor/api/config/v1alpha1"
 	corev1alpha1 "github.com/gardener/scaling-advisor/api/core/v1alpha1"
+	"github.com/gardener/scaling-advisor/operator/internal/controller/clusterstate"
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -29,12 +30,12 @@ type Reconciler struct {
 	client    client.Client
 	log       logr.Logger
 	config    configv1alpha1.ScalingAdviceControllerConfig
-	csBuilder *ClusterSnapshotBuilder
+	csBuilder *clusterstate.ClusterStateTracker
 	planner   *plannerStack
 }
 
 // NewReconciler eagerly builds the planner stack; failure here aborts manager startup.
-func NewReconciler(mgr ctrl.Manager, opCfg *configv1alpha1.OperatorConfig, csBuilder *ClusterSnapshotBuilder) (*Reconciler, error) {
+func NewReconciler(mgr ctrl.Manager, opCfg *configv1alpha1.OperatorConfig, csBuilder *clusterstate.ClusterStateTracker) (*Reconciler, error) {
 	stack, err := newPlannerStack(opCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build planner stack: %w", err)
@@ -89,7 +90,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Step 3: snapshot copy.
 	snap, err := r.csBuilder.Snapshot()
 	if err != nil {
-		if errors.Is(err, ErrSnapshotNotSynced) {
+		if errors.Is(err, clusterstate.ErrNotSynced) {
 			log.V(1).Info("waiting for cluster snapshot to sync; requeueing")
 			return ctrl.Result{Requeue: true}, nil
 		}
