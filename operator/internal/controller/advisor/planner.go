@@ -20,7 +20,8 @@ import (
 	"github.com/gardener/scaling-advisor/minkapi/view"
 	"github.com/gardener/scaling-advisor/planner"
 	"github.com/gardener/scaling-advisor/planner/scheduler"
-	pricingtestutil "github.com/gardener/scaling-advisor/pricing/testutil"
+	"github.com/gardener/scaling-advisor/pricing"
+
 	"github.com/gardener/scaling-advisor/samples"
 	"github.com/go-logr/logr"
 	storagev1 "k8s.io/api/storage/v1"
@@ -55,7 +56,7 @@ type plannerStack struct {
 }
 
 func newPlannerStack(opCfg *configv1alpha1.OperatorConfig) (*plannerStack, error) {
-	pricingAccess, err := pricingtestutil.GetInstancePricingAccessForTop20AWSInstanceTypes()
+	pricingAccess, err := pricing.GetInstancePricingAccess(opCfg.InstancePricing.Provider, opCfg.InstancePricing.InstancePricingDataPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load instance pricing: %w", err)
 	}

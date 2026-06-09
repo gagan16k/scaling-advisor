@@ -29,6 +29,8 @@ type OperatorConfig struct {
 	LeaderElection LeaderElectionConfig `json:"leaderElection"`
 	// Controllers defines the configuration for controllers.
 	Controllers ControllersConfig `json:"controllers"`
+	// InstancePricingData contains the configuration for instance pricing, which is used for cost-aware scaling decisions.
+	InstancePricing InstancePricingConfig `json:"instancePricingData"`
 }
 
 // ClientConnectionConfig contains details for constructing a client.
@@ -114,4 +116,12 @@ type ControllersConfig struct {
 type ScalingAdviceControllerConfig struct {
 	// RequeueAfter is the interval between successive snapshot builds.
 	RequeueAfter metav1.Duration `json:"requeueAfter"`
+}
+
+// InstancePricingConfig contains the configuration for instance pricing, which is used for cost-aware scaling decisions.
+type InstancePricingConfig struct {
+	// InstancePricingDataPath is the path to the instance pricing file, which contains the cost information for different instance types. This is used for cost-aware scaling decisions.
+	InstancePricingDataPath string `json:"instancePricingDataPath"`
+	// Provider specifies the cloud provider for which the scaling advisor is configured.
+	Provider commontypes.CloudProvider `json:"provider"`
 }
