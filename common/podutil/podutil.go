@@ -201,3 +201,10 @@ func CountUnscheduledPods(pods []corev1.Pod) (count int) {
 func IsUnscheduledPod(pod *corev1.Pod) bool {
 	return pod.Spec.NodeName == ""
 }
+
+// IsUnschedulable reports whether the scheduler has actively refused to place the pod, i.e. the
+// PodScheduled=False condition is present.
+func IsUnschedulable(pod *corev1.Pod) bool {
+	_, c := GetPodCondition(&pod.Status, corev1.PodScheduled)
+	return c != nil && c.Status == corev1.ConditionFalse
+}

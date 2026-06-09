@@ -24,7 +24,8 @@ type ScalingConstraint struct {
 	// Spec defines the specification of the ScalingConstraint.
 	Spec ScalingConstraintSpec `json:"spec"`
 	// Status defines the status of the ScalingConstraint.
-	Status ScalingConstraintStatus `json:"status,omitzero"`
+	// +optional
+	Status ScalingConstraintStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true

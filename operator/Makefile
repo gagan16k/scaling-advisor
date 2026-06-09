@@ -34,3 +34,34 @@ check: $(GOLANGCI_LINT) format
 test-unit:
 	go test -v -race -buildvcs -cover -coverprofile=${MODULE_ROOT}/coverage.out ./...
 	go tool cover -html=${MODULE_ROOT}/coverage.out -o ${MODULE_ROOT}/coverage.html
+
+GARDEN   ?= sap-landscape-dev
+PROJECT  ?= i765230
+SHOOT    ?= scad-demo
+
+KUBECONFIG_OUT_DIR ?= $(MODULE_ROOT)/testdata
+CRD_DIR    := $(REPO_ROOT)/api/core/v1alpha1/crds
+CRDS       := \
+	$(CRD_DIR)/sa.gardener.cloud_scalingconstraints.yaml \
+	$(CRD_DIR)/sa.gardener.cloud_scalingadvices.yaml
+
+## get-kubeconfig: download shoot kubeconfig to $(KUBECONFIG_OUT_DIR) (use MODE=cp or MODE=both for controlplane)
+.PHONY: get-kubeconfig
+get-kubeconfig:
+	GARDEN=$(GARDEN) PROJECT=$(PROJECT) SHOOT=$(SHOOT) \
+		OUT_DIR=$(KUBECONFIG_OUT_DIR) \
+		$(MODULE_ROOT)/testdata/scripts/get-kubeconfig.sh $(or $(MODE),shoot)
+
+KUBECONFIG ?= $(KUBECONFIG_OUT_DIR)/kubeconfig.yaml
+
+.PHONY: apply-crds
+apply-crds:
+	@for f in $(CRDS); do KUBECONFIG=$(KUBECONFIG) kubectl apply -f $$f; done
+
+.PHONY: delete-crds
+delete-crds:
+	@for f in $(CRDS); do KUBECONFIG=$(KUBECONFIG) kubectl delete --ignore-not-found -f $$f; done
+
+.PHONY: clear-advices
+clear-advice:
+	KUBECONFIG=$(KUBECONFIG) kubectl delete scalingadvices.sa.gardener.cloud --all --all-namespaces

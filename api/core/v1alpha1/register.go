@@ -7,6 +7,7 @@ package v1alpha1
 import (
 	"github.com/gardener/scaling-advisor/api/common/constants"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -31,7 +32,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ScalingAdviceList{},
 		&ScalingConstraint{},
 		&ScalingConstraintList{},
-		&ScalingFeedback{},
 	)
+	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil
 }

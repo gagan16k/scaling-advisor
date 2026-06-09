@@ -79,6 +79,7 @@ func TestLaunchOptions_ValidateAndLoadOperatorConfig(t *testing.T) {
 
 func updateOperatorConfigWithDefaults(operatorConfig *configv1alpha1.OperatorConfig) *configv1alpha1.OperatorConfig {
 	configv1alpha1.SetDefaults_ScalingAdvisorServerConfiguration(&operatorConfig.Server)
+	configv1alpha1.SetDefaults_ScalingAdviceControllerConfiguration(&operatorConfig.Controllers.ScalingAdvice)
 	operatorConfig.TypeMeta = metav1.TypeMeta{
 		Kind:       constants.KindOperatorConfig,
 		APIVersion: configv1alpha1.SchemeGroupVersion.String(),

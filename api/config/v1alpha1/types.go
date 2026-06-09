@@ -105,12 +105,13 @@ type ScalingAdviceGenerationConfig struct {
 
 // ControllersConfig defines the configuration for controllers that are run as part of the scaling-advisor.
 type ControllersConfig struct {
-	// ScalingConstraints is the configuration for then controller that reconciles ScalingConstraints.
-	ScalingConstraints ScalingConstraintsControllerConfig `json:"scalingConstraints"`
+	// ScalingAdvice is the configuration for the controller that periodically generates scaling advice.
+	ScalingAdvice ScalingAdviceControllerConfig `json:"scalingAdvice"`
 }
 
-// ScalingConstraintsControllerConfig is the configuration for then controller that reconciles ScalingConstraints.
-type ScalingConstraintsControllerConfig struct {
-	// ConcurrentSyncs is the maximum number concurrent reconciliations that can be run for this controller.
-	ConcurrentSyncs int `json:"concurrentSyncs"`
+// ScalingAdviceControllerConfig is the configuration for the controller that periodically rebuilds the
+// cluster snapshot and (eventually) generates scaling advice.
+type ScalingAdviceControllerConfig struct {
+	// RequeueAfter is the interval between successive snapshot builds.
+	RequeueAfter metav1.Duration `json:"requeueAfter"`
 }

@@ -19,6 +19,7 @@ import (
 func main() {
 	// Set up logr with klog backend using NewKlogr
 	log := klog.NewKlogr()
+	ctrl.SetLogger(log)
 
 	launchOpts, err := cli.ParseLaunchOptions(os.Args[1:])
 	if err != nil {

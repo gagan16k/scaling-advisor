@@ -5,9 +5,11 @@ metadata:
   namespace: default
 spec:
   nodePools:
-    - availabilityZones:
-        - eu-west-1c
-      name: a
+    - name: worker-1
+      region: eu-west-1
+      priority: 0
+      availabilityZones:
+        - eu-west-1b
       labels:
         kubernetes.io/arch: amd64
         worker.gardener.cloud/pool: small
@@ -15,19 +17,24 @@ spec:
         worker.gardener.cloud/system-components: "true"
         sa.gardener.cloud/node-pool-name: worker-1
         sa.gardener.cloud/node-template-name: m5l
+      quota:
+        cpu: "32"
+        memory: 128Gi
       nodeTemplates:
-        - architecture: amd64
+        - name: m5l
+          instanceType: m5.large
+          architecture: amd64
+          priority: 0
+          maxVolumes: 25
           capacity:
             cpu: "2"
-            gpu: "0"
             memory: 8Gi
-          instanceType: m5.large
+            gpu: "0"
+            pods: "110"
           kubeReservedCapacity:
             cpu: 80m
             memory: 1Gi
             pid: 20k
-          name: m5l
-          priority: 0
-          maxVolumes: 25
-      priority: 0
-      region: eu-west-1
+          systemReservedCapacity:
+            cpu: 20m
+            memory: 256Mi

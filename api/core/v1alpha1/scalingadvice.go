@@ -40,9 +40,10 @@ type ScalingAdviceList struct {
 type ScalingAdviceSpec struct {
 	// ScaleOutPlan is the plan for scaling out across node pools.
 	// +optional
-	ScaleOutPlan *ScaleOutPlan `json:"scaleOutPlan"`
+	ScaleOutPlan *ScaleOutPlan `json:"scaleOutPlan,omitempty"`
 	// ScaleInPlan is the plan for scaling in across node pools.
-	ScaleInPlan *ScaleInPlan `json:"scaleInPlan"`
+	// +optional
+	ScaleInPlan *ScaleInPlan `json:"scaleInPlan ,omitempty"`
 	// ConstraintRef is a reference to the ScalingConstraint that this advice is based on.
 	ConstraintRef apicommon.NamespacedName `json:"constraintRef"`
 }
@@ -56,6 +57,9 @@ type ScalingAdviceStatus struct {
 	Diagnostic *ScalingAdviceDiagnostic `json:"diagnostic,omitempty"`
 	// Conditions represents additional information
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// Feedback represents the [ScalingFeedback] from the lifecycle manager applying the [ScalingAdvice]
+	// +optional
+	Feedback *ScalingFeedback `json:"feedback,omitempty"`
 }
 
 // ScaleOutPlan is the plan for scaling out a node pool.
