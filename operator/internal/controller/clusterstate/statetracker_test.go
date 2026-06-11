@@ -216,26 +216,8 @@ func TestStorageClassDeepCopiedOnInsert(t *testing.T) {
 	}
 }
 
-func TestBuildIndependence(t *testing.T) {
-	b := newTestBuilder()
-	h := b.podHandler().(toolscache.ResourceEventHandlerFuncs)
-
-	h.AddFunc(unschedulablePod("ns", "p1"))
-	first := mustSnapshot(t, b)
-
-	// Add another pod after the first Build.
-	h.AddFunc(unschedulablePod("ns", "p2"))
-
-	// First snapshot must remain at one element.
-	if got := len(first.Pods); got != 1 {
-		t.Errorf("first snapshot pod count = %d, want 1 (Build returned aliased state)", got)
-	}
-
-	// Second Build observes the new pod.
-	if got := len(mustSnapshot(t, b).Pods); got != 2 {
-		t.Errorf("second snapshot pod count = %d, want 2", got)
-	}
-}
+// Snapshot independence is covered at the clusterState level in TestSnapshotIsIndependent
+// (clusterstate_test.go) — the handler path adds nothing distinct.
 
 func TestSnapshotNotSyncedReturnsError(t *testing.T) {
 	b := &ClusterStateTracker{

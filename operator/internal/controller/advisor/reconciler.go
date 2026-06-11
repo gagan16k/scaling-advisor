@@ -24,13 +24,15 @@ const (
 	controllerName = "scaling-advisor-controller"
 )
 
+const shortRetry = 5 * time.Second
+
 // Reconciler reconciles ScalingConstraint against the latest in-memory ClusterSnapshot and
 // (eventually) drives the embedded planner to produce ScalingAdvice. See docs/operator.md.
 type Reconciler struct {
 	client    client.Client
 	log       logr.Logger
 	config    configv1alpha1.ScalingAdviceControllerConfig
-	csBuilder *clusterstate.ClusterStateTracker
+	csTracker *clusterstate.ClusterStateTracker
 	planner   *plannerStack
 }
 
@@ -44,7 +46,7 @@ func NewReconciler(mgr ctrl.Manager, opCfg *configv1alpha1.OperatorConfig, csBui
 		client:    mgr.GetClient(),
 		log:       mgr.GetLogger().WithName(componentName),
 		config:    opCfg.Controllers.ScalingAdvice,
-		csBuilder: csBuilder,
+		csTracker: csBuilder,
 		planner:   stack,
 	}, nil
 }
@@ -61,7 +63,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// Reconcile implements the pseudocode in docs/operator.md:
+// Reconcile implements. Its logic follows the steps:
 //  1. Fetch the constraint.
 //  2. Fetch the latest advice for it; skip / requeue / mark stale per ack state.
 //  3. Build a snapshot copy from r.csBuilder.
@@ -88,11 +90,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	//   - If advice is too old (configurable timeout): mark stale, fall through.
 
 	// Step 3: snapshot copy.
-	snap, err := r.csBuilder.Snapshot()
+	snap, err := r.csTracker.Snapshot()
 	if err != nil {
 		if errors.Is(err, clusterstate.ErrNotSynced) {
-			log.V(1).Info("waiting for cluster snapshot to sync; requeueing")
-			return ctrl.Result{Requeue: true}, nil
+			log.Info("waiting for cluster snapshot to sync; requeueing")
+			return ctrl.Result{RequeueAfter: shortRetry}, nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -117,13 +119,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, fmt.Errorf("planner run failed: %w", err)
 	}
 	if plan == nil || (len(plan.Items) == 0 && len(plan.UnsatisfiedPodNames) == 0) {
-		log.V(1).Info("planner produced empty plan; skipping publish")
+		log.Info("planner produced empty plan; skipping publish")
 		return ctrl.Result{RequeueAfter: r.config.RequeueAfter.Duration}, nil
 	}
 
 	// Step 7: verify advice.
 	// TODO:
-	//   a. Re-fetch fresh snapshot via r.csBuilder.Snapshot(); compare to planning snapshot. If
+	//   a. Re-fetch fresh snapshot via r.csTracker.Snapshot(); compare to planning snapshot. If
 	//      delta exceeds threshold, reject.
 	//   b. Compare delta/current against node-pool min/max quotas.
 

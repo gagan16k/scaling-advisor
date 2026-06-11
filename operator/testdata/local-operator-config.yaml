@@ -1,12 +1,13 @@
 apiVersion: config.sa.gardener.cloud/v1alpha1
 kind: OperatorConfig
 controlPlaneClientConnection:
-  kubeConfigPath: ./operator/testdata/controlPlaneKubeconfig.yaml
+  #kubeConfigPath: ./testdata/kubeconfig-cp.yaml
+  kubeConfigPath: ./testdata/kubeconfig.yaml
 dataPlaneClientConnection:
-  kubeConfigPath: ./operator/testdata/dataPlaneKubeconfig.yaml
-instancePricing:
+  kubeConfigPath: ./testdata/kubeconfig.yaml
+instancePricingData:
   provider: aws
-  instancePricingDataPath: ./pricing/testutil/data/aws_eu-west-1_top20_instance_pricing.json
+  instancePricingDataPath: ../pricing/testutil/data/aws_eu-west-1_top20_instance_pricing.json
 controllers:
   scalingAdvice:
     requeueAfter: 10s
