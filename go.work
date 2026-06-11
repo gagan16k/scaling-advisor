@@ -9,5 +9,6 @@ use (
 	./pricing
 	./samples
 	./service
+	./test/fakeactuator
 	./tools
 )
