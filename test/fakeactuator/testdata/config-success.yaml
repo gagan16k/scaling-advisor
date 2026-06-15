@@ -1,0 +1,32 @@
+# Default success config — no failure rules, default timings.
+# All placements succeed; Nodes are created immediately.
+#
+# Kubeconfigs mirror local-operator-config.yaml (single cluster for both planes).
+# Override on the CLI:
+#   make start CONTROL_PLANE_KUBECONFIG=../../operator/testdata/kubeconfig-cp.yaml \
+#              DATA_PLANE_KUBECONFIG=../../operator/testdata/kubeconfig.yaml
+
+# Where ScalingAdvice CRs live (the fake actuator watches and acks them here).
+controlPlaneKubeconfig: "../../operator/testdata/kubeconfig.yaml"
+# Where worker Nodes live (the fake actuator creates them here on scale-out).
+dataPlaneKubeconfig:    "../../operator/testdata/kubeconfig.yaml"
+
+timing:
+  # How long the operator waits for the new node to show up before giving up.
+  creationDelay:    60s
+
+  # How long the fake actuator pretends to take before creating the Node.
+  nodeCreateDelay:  30s
+
+  # Extra delay before the Node is marked Ready. 0s = ready immediately.
+  nodeReadyDelay:   0s
+
+  # How long a failed placement is parked in backoff.
+  backoffDuration:  2m
+
+  # How long to wait before deleting Nodes on scale-in. 0s = delete immediately.
+  deleteGraceDelay: 0s
+
+# Per-placement failure injection. Empty = every placement succeeds.
+# Schema: test/fakeactuator/internal/config/config.go (FailureRule).
+failureRules: []

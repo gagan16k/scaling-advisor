@@ -1,0 +1,27 @@
+# Backoff config — one resourceExhausted rule for worker-1 / eu-west-1b.
+# All other placements succeed normally.
+#
+# Usage:
+#   make start CONFIG=testdata/config-backoff.yaml
+#
+# Expected: Feedback for the matched placement carries ErrorType=ResourceExhaustedError
+# and BackoffUntil=now+5m; operator filters that placement from subsequent constraint runs.
+
+controlPlaneKubeconfig: "../../operator/testdata/kubeconfig.yaml"
+dataPlaneKubeconfig:    "../../operator/testdata/kubeconfig.yaml"
+
+timing:
+  creationDelay:    30s
+  nodeCreateDelay:  0s
+  nodeReadyDelay:   0s
+  backoffDuration:  2m
+  deleteGraceDelay: 0s
+
+failureRules:
+  - match:
+      poolName:     worker-1
+      templateName: ""        # wildcard — any template in worker-1
+      instanceType: ""        # wildcard
+      zone:         eu-west-1b
+    mode: resourceExhausted
+    backoffDuration: 5m
