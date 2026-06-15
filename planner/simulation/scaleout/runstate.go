@@ -74,7 +74,7 @@ func (r *RunState) Init(parentCtx context.Context, name string, runNum uint32, v
 		return r.ctx, fmt.Errorf("unable to get unscheduled pods from view %q: %w", view.GetName(), err)
 	}
 	if len(unscheduledPods) == 0 {
-		return r.ctx, fmt.Errorf("no unscheduled pods in the view %q", view.GetName())
+		return r.ctx, fmt.Errorf("%w in the view %q", plannerapi.ErrNoUnscheduledPods, view.GetName())
 	}
 	r.unscheduledPods = unscheduledPods
 	r.leftoverUnscheduledPodNames = sets.New(slices.Collect(maps.Keys(unscheduledPods))...)
