@@ -126,6 +126,9 @@ type ClusterSnapshot struct {
 	Pods []PodInfo `json:"pods,omitempty"`
 	// Nodes are the nodes that are present in the cluster.
 	Nodes []NodeInfo `json:"nodes,omitempty"`
+	// UpcomingNodes are synthetic NodeInfos for acknowledged ScaleOutItem replicas whose CreationDeadline has not yet expired. Populated by the operator from
+	// observed ScalingAdvice feedback.
+	UpcomingNodes []NodeInfo `json:"upcomingNodes,omitempty"`
 	// PVs are the information about PersistentVolumes in the cluster. Should not contain deleted PVs.
 	// Should only contain *bound* PVs ie those with populated claimRef.
 	PVs []PVInfo `json:"pvs,omitempty"`

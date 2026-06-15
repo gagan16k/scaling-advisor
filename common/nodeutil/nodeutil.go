@@ -5,6 +5,8 @@
 package nodeutil
 
 import (
+	"fmt"
+	"maps"
 	"time"
 
 	"github.com/gardener/scaling-advisor/common/objutil"
@@ -65,14 +67,23 @@ func BuildAllocatable(capacity, systemReserved, kubeReserved corev1.ResourceList
 	return allocatable
 }
 
-// BuildReadyConditions builds a slice of NodeCondition for a ready node with the given transition time.
+// BuildReadyConditions builds a full set of NodeConditions for a healthy node.
+// All pressure conditions are set to False and NodeReady to True
 func BuildReadyConditions(transitionTime time.Time) []corev1.NodeCondition {
+	ts := metav1.Time{Time: transitionTime}
+	make := func(t corev1.NodeConditionType, s corev1.ConditionStatus) corev1.NodeCondition {
+		return corev1.NodeCondition{
+			Type:               t,
+			Status:             s,
+			LastHeartbeatTime:  ts,
+			LastTransitionTime: ts,
+		}
+	}
 	return []corev1.NodeCondition{
-		{
-			Type:               corev1.NodeReady,
-			Status:             corev1.ConditionTrue,
-			LastTransitionTime: metav1.Time{Time: transitionTime},
-		},
+		make(corev1.NodeReady, corev1.ConditionTrue),
+		make(corev1.NodeMemoryPressure, corev1.ConditionFalse),
+		make(corev1.NodeDiskPressure, corev1.ConditionFalse),
+		make(corev1.NodePIDPressure, corev1.ConditionFalse),
 	}
 }
 
@@ -103,5 +114,61 @@ func NewCSINode(nodeName string, nodeUID types.UID, csiNodeSpec storagev1.CSINod
 			},
 		},
 		Spec: csiNodeSpec,
+	}
+}
+
+// FindPoolTemplate returns the NodePool and NodeTemplate in constraint whose (name, templateName, instanceType) match placement.
+// Returns (nil, nil, false) when constraint is nil or no matching (pool, template) pair is found.
+// TODO: To be changed after API changes PR#168
+func FindPoolTemplate(constraint *sacorev1alpha1.ScalingConstraint, p sacorev1alpha1.NodePlacement) (*sacorev1alpha1.NodePool, *sacorev1alpha1.NodeTemplate, bool) {
+	if constraint == nil {
+		return nil, nil, false
+	}
+	for i := range constraint.Spec.NodePools {
+		pool := &constraint.Spec.NodePools[i]
+		if pool.Name != p.PoolName {
+			continue
+		}
+		for j := range pool.NodeTemplates {
+			t := &pool.NodeTemplates[j]
+			if t.Name == p.TemplateName && t.InstanceType == p.InstanceType {
+				return pool, t, true
+			}
+		}
+	}
+	return nil, nil, false
+}
+
+// BuildUpcomingNodeInfo synthesises a NodeInfo. The hostname follows the format
+// upcoming-<adviceUID>-<pool>-<template>-<itemIdx>-<replicaIdx>.
+func BuildUpcomingNodeInfo(
+	adviceUID types.UID,
+	itemIdx, replicaIdx int32,
+	pool *sacorev1alpha1.NodePool,
+	template *sacorev1alpha1.NodeTemplate,
+	placement sacorev1alpha1.NodePlacement,
+	readyConditions []corev1.NodeCondition,
+) plannerapi.NodeInfo {
+	hostname := fmt.Sprintf("upcoming-%s-%s-%s-%d-%d",
+		adviceUID, placement.PoolName, placement.TemplateName, itemIdx, replicaIdx)
+
+	labels := map[string]string{}
+	maps.Copy(labels, pool.Labels)
+	AddNodeLabels(labels, template.Architecture, hostname, placement)
+
+	annotations := map[string]string{}
+	maps.Copy(annotations, pool.Annotations)
+
+	return plannerapi.NodeInfo{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        hostname,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		InstanceType: template.InstanceType,
+		Capacity:     template.Capacity.DeepCopy(),
+		Allocatable:  BuildAllocatable(template.Capacity, template.SystemReserved, template.KubeReserved),
+		Taints:       append([]corev1.Taint(nil), pool.Taints...),
+		Conditions:   readyConditions,
 	}
 }
