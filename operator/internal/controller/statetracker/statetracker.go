@@ -2,15 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package clusterstate
+package statetracker
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	commontypes "github.com/gardener/scaling-advisor/api/common/types"
+	corev1alpha1 "github.com/gardener/scaling-advisor/api/core/v1alpha1"
 	"github.com/gardener/scaling-advisor/api/planner"
 	"github.com/gardener/scaling-advisor/common/nodeutil"
 	"github.com/gardener/scaling-advisor/common/podutil"
@@ -20,6 +22,7 @@ import (
 	nodev1 "k8s.io/api/node/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/types"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -29,25 +32,26 @@ import (
 // ErrNotSynced is returned by Snapshot when the builder has not yet completed its initial cache sync.
 var ErrNotSynced = errors.New("cluster snapshot not synced")
 
-// ClusterStateTracker owns shared informers for the seven object kinds the planner cares about
-// (pods / nodes / PVs / PVCs / storage classes / priority classes / runtime classes) and keeps an
-// in-memory projection updated on watch events. Snapshot() returns the current projection for
-// planner consumption; the builder does not drive reconcile triggers.
+// ClusterStateTracker watches the data-plane (pods/nodes/PVs/PVCs/SCs/PCs/RCs) for snapshot
+// and the control-plane for ScalingAdvice
 type ClusterStateTracker struct {
-	log    logr.Logger
-	cache  cache.Cache
-	state  *clusterState
-	synced atomic.Bool
+	log               logr.Logger
+	dataPlaneCache    cache.Cache
+	controlPlaneCache cache.Cache
+	state             *clusterState
+	synced            atomic.Bool
 }
 
 var _ manager.Runnable = (*ClusterStateTracker)(nil)
 
-// NewClusterStateTracker returns a ClusterStateTracker backed by the given manager cache.
-func NewClusterStateTracker(c cache.Cache, log logr.Logger) *ClusterStateTracker {
+// NewClusterStateTracker returns a tracker that watches dataPlaneCache for
+// scheduling-relevant kinds and controlPlaneCache for ScalingAdvice.
+func NewClusterStateTracker(controlPlaneCache, dataPlaneCache cache.Cache, log logr.Logger) *ClusterStateTracker {
 	return &ClusterStateTracker{
-		log:   log,
-		cache: c,
-		state: newClusterState(),
+		log:               log,
+		dataPlaneCache:    dataPlaneCache,
+		controlPlaneCache: controlPlaneCache,
+		state:             newClusterState(),
 	}
 }
 
@@ -56,39 +60,55 @@ func (b *ClusterStateTracker) NeedLeaderElection() bool {
 	return false
 }
 
-func (b *ClusterStateTracker) Snapshot() (planner.ClusterSnapshot, error) {
+func (b *ClusterStateTracker) Snapshot(now time.Time) (planner.ClusterSnapshot, error) {
 	if !b.synced.Load() {
 		return planner.ClusterSnapshot{}, ErrNotSynced
 	}
-	return b.state.snapshot(), nil
+	return b.state.snapshot(now), nil
 }
 
-// Start registers per-type handlers on each watched informer, waits for cache sync, and blocks
-// until ctx is cancelled.
+// FilterConstraint returns a deep-copy of in with backed-off NodePlacements removed.
+func (b *ClusterStateTracker) FilterConstraint(in *corev1alpha1.ScalingConstraint, now time.Time) *corev1alpha1.ScalingConstraint {
+	return b.state.filterConstraint(in, now)
+}
+
+// IsLatestAdviceAcknowledged reports whether the latest ScalingAdvice observed for the constraint with this key has been acknowledged.
+// Returns true if no advice has been observed yet
+func (b *ClusterStateTracker) IsLatestAdviceAcknowledged(ref commontypes.NamespacedName) bool {
+	return b.state.isLatestAdviceAcknowledged(ref)
+}
+
+// Start registers per-type handlers on each watched informer (across both caches),
+// waits for both caches to sync, and blocks until ctx is cancelled.
 func (b *ClusterStateTracker) Start(ctx context.Context) error {
 	b.log.Info("cluster state tracker starting")
 	defer b.log.Info("cluster state tracker stopped")
 
 	type watch struct {
+		c       cache.Cache
 		obj     client.Object
 		handler toolscache.ResourceEventHandler
 	}
 	watches := []watch{
-		{&corev1.Pod{}, b.podHandler()},
-		{&corev1.Node{}, b.nodeHandler()},
-		{&corev1.PersistentVolume{}, b.pvHandler()},
-		{&corev1.PersistentVolumeClaim{}, b.pvcHandler()},
-		{&storagev1.StorageClass{}, b.storageClassHandler()},
-		{&schedulingv1.PriorityClass{}, b.priorityClassHandler()},
-		{&nodev1.RuntimeClass{}, b.runtimeClassHandler()},
+		{b.dataPlaneCache, &corev1.Pod{}, b.podHandler()},
+		{b.dataPlaneCache, &corev1.Node{}, b.nodeHandler()},
+		{b.dataPlaneCache, &corev1.PersistentVolume{}, b.pvHandler()},
+		{b.dataPlaneCache, &corev1.PersistentVolumeClaim{}, b.pvcHandler()},
+		{b.dataPlaneCache, &storagev1.StorageClass{}, b.storageClassHandler()},
+		{b.dataPlaneCache, &schedulingv1.PriorityClass{}, b.priorityClassHandler()},
+		{b.dataPlaneCache, &nodev1.RuntimeClass{}, b.runtimeClassHandler()},
+		{b.controlPlaneCache, &corev1alpha1.ScalingAdvice{}, b.adviceHandler()},
 	}
 	for _, w := range watches {
-		if err := b.registerHandler(ctx, w.obj, w.handler); err != nil {
+		if err := b.registerHandler(ctx, w.c, w.obj, w.handler); err != nil {
 			return err
 		}
 	}
-	if !b.cache.WaitForCacheSync(ctx) {
-		return fmt.Errorf("cluster state tracker: cache sync did not complete")
+	if !b.dataPlaneCache.WaitForCacheSync(ctx) {
+		return fmt.Errorf("cluster state tracker: data-plane cache sync did not complete")
+	}
+	if !b.controlPlaneCache.WaitForCacheSync(ctx) {
+		return fmt.Errorf("cluster state tracker: control-plane cache sync did not complete")
 	}
 	b.synced.Store(true)
 	b.log.V(2).Info("cluster state tracker ready", "watchedKinds", len(watches))
@@ -97,9 +117,8 @@ func (b *ClusterStateTracker) Start(ctx context.Context) error {
 	return nil
 }
 
-// registerHandler attaches h to the informer for obj.
-func (b *ClusterStateTracker) registerHandler(ctx context.Context, obj client.Object, h toolscache.ResourceEventHandler) error {
-	informer, err := b.cache.GetInformer(ctx, obj)
+func (b *ClusterStateTracker) registerHandler(ctx context.Context, c cache.Cache, obj client.Object, h toolscache.ResourceEventHandler) error {
+	informer, err := c.GetInformer(ctx, obj)
 	if err != nil {
 		return fmt.Errorf("cluster state tracker: get informer for %T: %w", obj, err)
 	}
@@ -147,6 +166,22 @@ func (b *ClusterStateTracker) podHandler() toolscache.ResourceEventHandler {
 }
 
 func (b *ClusterStateTracker) nodeHandler() toolscache.ResourceEventHandler {
+	upsert := func(node *corev1.Node) {
+		ni := nodeutil.AsNodeInfo(*node)
+		// Only the first appearance of a node consumes an upcoming slot;
+		// subsequent updates (heartbeat, status, periodic resync) refresh the
+		// stored NodeInfo without touching upcoming.
+		firstSeen := b.state.upsertNode(ni)
+		if !firstSeen {
+			return
+		}
+		placement, err := ni.GetNodePlacement()
+		if err != nil {
+			b.log.V(4).Info("node missing required labels; not consuming any upcoming entry", "node", node.Name, "err", err)
+			return
+		}
+		b.state.removeUpcomingMatching(placement)
+	}
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			node, ok := obj.(*corev1.Node)
@@ -155,7 +190,7 @@ func (b *ClusterStateTracker) nodeHandler() toolscache.ResourceEventHandler {
 				return
 			}
 			b.log.V(4).Info("node added", "name", node.Name)
-			b.state.upsertNode(nodeutil.AsNodeInfo(*node))
+			upsert(node)
 		},
 		UpdateFunc: func(_, newObj any) {
 			node, ok := newObj.(*corev1.Node)
@@ -164,7 +199,7 @@ func (b *ClusterStateTracker) nodeHandler() toolscache.ResourceEventHandler {
 				return
 			}
 			b.log.V(4).Info("node updated", "name", node.Name)
-			b.state.upsertNode(nodeutil.AsNodeInfo(*node))
+			upsert(node)
 		},
 		DeleteFunc: func(obj any) {
 			node, ok := tombstoneOrObject[*corev1.Node](obj)
@@ -345,6 +380,63 @@ func (b *ClusterStateTracker) runtimeClassHandler() toolscache.ResourceEventHand
 			b.state.deleteRuntimeClass(rc.Name)
 		},
 	}
+}
+
+// adviceHandler observes ScalingAdvice on the control-plane cache.
+func (b *ClusterStateTracker) adviceHandler() toolscache.ResourceEventHandler {
+	apply := func(advice *corev1alpha1.ScalingAdvice) {
+		var constraint *corev1alpha1.ScalingConstraint
+		if isAdviceAcknowledged(advice) {
+			constraint = b.lookupConstraint(advice)
+		}
+		b.state.applyAdvice(advice, constraint)
+	}
+	return toolscache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			advice, ok := obj.(*corev1alpha1.ScalingAdvice)
+			if !ok {
+				b.log.V(2).Info("adviceHandler.Add: unexpected type", "type", fmt.Sprintf("%T", obj))
+				return
+			}
+			b.log.V(4).Info("scalingadvice added", "namespace", advice.Namespace, "name", advice.Name)
+			apply(advice)
+		},
+		UpdateFunc: func(_, newObj any) {
+			advice, ok := newObj.(*corev1alpha1.ScalingAdvice)
+			if !ok {
+				b.log.V(2).Info("adviceHandler.Update: unexpected type", "type", fmt.Sprintf("%T", newObj))
+				return
+			}
+			b.log.V(4).Info("scalingadvice updated", "namespace", advice.Namespace, "name", advice.Name)
+			apply(advice)
+		},
+		// TODO: deletion action needs to be decided
+		DeleteFunc: func(obj any) {
+			advice, ok := tombstoneOrObject[*corev1alpha1.ScalingAdvice](obj)
+			if !ok {
+				b.log.V(2).Info("adviceHandler.Delete: unexpected type", "type", fmt.Sprintf("%T", obj))
+				return
+			}
+			b.log.V(4).Info("scalingadvice deleted", "namespace", advice.Namespace, "name", advice.Name)
+			b.state.forgetAdvice(advice.Spec.ConstraintRef, advice.UID)
+		},
+	}
+}
+
+// lookupConstraint resolves the ScalingConstraint referenced by advice from the control-plane cache.
+// TODO: It is possible to miss updates to advice (which triggered the handler) if there is any failure in reading constraints here
+// Returns nil on cache miss; callers downstream treat a nil constraint as "skip upcoming-node synthesis".
+func (b *ClusterStateTracker) lookupConstraint(advice *corev1alpha1.ScalingAdvice) *corev1alpha1.ScalingConstraint {
+	ref := advice.Spec.ConstraintRef
+	constraint := &corev1alpha1.ScalingConstraint{}
+	if err := b.controlPlaneCache.Get(context.Background(), types.NamespacedName{
+		Namespace: ref.Namespace, Name: ref.Name,
+	}, constraint); err != nil {
+		b.log.V(2).Info("constraint lookup failed; skipping advice upcoming-node synthesis",
+			"advice", advice.Name, "err", err)
+		return nil
+	}
+	return constraint
 }
 
 // tombstoneOrObject extracts the typed object from a Delete event, transparently handling the

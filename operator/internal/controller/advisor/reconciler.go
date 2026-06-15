@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
+	commontypes "github.com/gardener/scaling-advisor/api/common/types"
 	configv1alpha1 "github.com/gardener/scaling-advisor/api/config/v1alpha1"
 	corev1alpha1 "github.com/gardener/scaling-advisor/api/core/v1alpha1"
-	"github.com/gardener/scaling-advisor/operator/internal/controller/clusterstate"
+	"github.com/gardener/scaling-advisor/operator/internal/controller/statetracker"
 	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -32,12 +34,12 @@ type Reconciler struct {
 	client    client.Client
 	log       logr.Logger
 	config    configv1alpha1.ScalingAdviceControllerConfig
-	csTracker *clusterstate.ClusterStateTracker
+	csTracker *statetracker.ClusterStateTracker
 	planner   *plannerStack
 }
 
 // NewReconciler eagerly builds the planner stack; failure here aborts manager startup.
-func NewReconciler(mgr ctrl.Manager, opCfg *configv1alpha1.OperatorConfig, csBuilder *clusterstate.ClusterStateTracker) (*Reconciler, error) {
+func NewReconciler(mgr ctrl.Manager, opCfg *configv1alpha1.OperatorConfig, csBuilder *statetracker.ClusterStateTracker) (*Reconciler, error) {
 	stack, err := newPlannerStack(opCfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build planner stack: %w", err)
@@ -58,23 +60,23 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return builder.ControllerManagedBy(mgr).
 		Named(controllerName).
 		For(&corev1alpha1.ScalingConstraint{}).
-		// TODO: also watch ScalingFeedback (corev1alpha1.ScalingFeedback) and map back to its
-		// constraint, so feedback ack/nack drives a reconcile.
 		Complete(r)
 }
 
 // Reconcile implements. Its logic follows the steps:
 //  1. Fetch the constraint.
-//  2. Fetch the latest advice for it; skip / requeue / mark stale per ack state.
-//  3. Build a snapshot copy from r.csBuilder.
-//  4. Fetch in-memory feedback.
-//  5. Filter backed-off / invalid node groups.
-//  6. Run the planner (embedded, in-process).
-//  7. Verify advice against fresh snapshot + constraints.
-//  8. Publish ClusterScalingAdvice on success.
+//  2. Skip if the latest advice for it is not yet acknowledged (per the
+//     ClusterStateTracker's watch).
+//  3. Filter backed-off NodePlacements out of the constraint.
+//  4. Build a snapshot copy from r.csTracker.
+//  5. Run the planner (embedded, in-process).
+//  6. Verify advice against fresh snapshot + constraints.
+//  7. Publish ClusterScalingAdvice on success.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.log.WithValues("namespace", req.Namespace, "name", req.Name)
+	now := time.Now() // TODO: GLobal time vs. per-step time? Should we pass now to FilterConstraint and Snapshot?
 
+	// Step 1: fetch constraint. If not found, skip without error; watch will trigger on next create.
 	constraint := &corev1alpha1.ScalingConstraint{}
 	if err := r.client.Get(ctx, req.NamespacedName, constraint); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -84,15 +86,23 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// Step 2: fetch latest advice; honour ack-pending / stale-timeout rules.
-	// TODO: list ClusterScalingAdvice for this constraint, pick latest revision.
-	//   - If advice is ack-pending and not yet stale: return ctrl.Result{RequeueAfter: ...}.
-	//   - If advice is too old (configurable timeout): mark stale, fall through.
+	// Step 2: skip if the latest advice has not yet been acknowledged.
+	if !r.csTracker.IsLatestAdviceAcknowledged(commontypes.NamespacedName(req.NamespacedName)) {
+		log.Info("latest ScalingAdvice not yet acknowledged; skipping reconcile")
+		return ctrl.Result{RequeueAfter: r.config.RequeueAfter.Duration}, nil
+	}
 
-	// Step 3: snapshot copy.
-	snap, err := r.csTracker.Snapshot()
+	// Step 3: drop NodePlacements currently in backoff before planning.
+	filteredConstraint := r.csTracker.FilterConstraint(constraint, now)
+	if filteredConstraint == nil || len(filteredConstraint.Spec.NodePools) == 0 {
+		log.Info("all node pools currently in backoff; nothing to plan")
+		return ctrl.Result{RequeueAfter: r.config.RequeueAfter.Duration}, nil
+	}
+
+	// Step 4: snapshot copy.
+	snap, err := r.csTracker.Snapshot(now)
 	if err != nil {
-		if errors.Is(err, clusterstate.ErrNotSynced) {
+		if errors.Is(err, statetracker.ErrNotSynced) {
 			log.Info("waiting for cluster snapshot to sync; requeueing")
 			return ctrl.Result{RequeueAfter: shortRetry}, nil
 		}
@@ -101,35 +111,39 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	log.Info("snapshot retrieved",
 		"pods", len(snap.Pods),
 		"nodes", len(snap.Nodes),
+		"upcoming", len(snap.UpcomingNodes),
 		"pvs", len(snap.PVs),
 		"pvcs", len(snap.PVCs))
 
-	// Step 4: feedback lookup.
-	// TODO: read from in-memory feedback store keyed by constraint name.
-
-	// Step 5: filter node groups.
-	// TODO: build the planner-facing view of node pools by removing those currently in backoff
-	//       (per feedback) or otherwise invalid.
-
-	// Step 6: run the embedded planner.
-	plan, err := r.runPlanner(ctx, log, snap, constraint)
+	// Step 5: run the embedded planner.
+	plan, err := r.runPlanner(ctx, log, snap, filteredConstraint)
 	if err != nil {
-		// Return the error so the workqueue applies rate-limited backoff;
-		// watch and heartbeat triggers continue to fire independently.
-		return ctrl.Result{}, fmt.Errorf("planner run failed: %w", err)
+		switch classifyPlannerErr(err) {
+		case plannerErrRetry:
+			log.Info("planner produced no advice this tick", "reason", err.Error())
+			return ctrl.Result{RequeueAfter: r.config.RequeueAfter.Duration}, nil
+		case plannerErrConfig:
+			log.Error(err, "planner rejected request as misconfigured")
+			return ctrl.Result{RequeueAfter: r.config.RequeueAfter.Duration}, nil
+		default:
+			return ctrl.Result{}, fmt.Errorf("planner run failed: %w", err)
+		}
 	}
 	if plan == nil || (len(plan.Items) == 0 && len(plan.UnsatisfiedPodNames) == 0) {
 		log.Info("planner produced empty plan; skipping publish")
 		return ctrl.Result{RequeueAfter: r.config.RequeueAfter.Duration}, nil
 	}
+	log.Info("planner produced plan",
+		"items", len(plan.Items),
+		"unsatisfiedPods", len(plan.UnsatisfiedPodNames))
 
-	// Step 7: verify advice.
+	// Step 6: verify advice.
 	// TODO:
 	//   a. Re-fetch fresh snapshot via r.csTracker.Snapshot(); compare to planning snapshot. If
 	//      delta exceeds threshold, reject.
 	//   b. Compare delta/current against node-pool min/max quotas.
 
-	// Step 8: publish ScalingAdvice. Each successful run produces a CR with a
+	// Step 7: publish ScalingAdvice. Each successful run produces a CR with a
 	// fresh UUID-based name; advice is never updated in place.
 	if err := r.publishAdvice(ctx, log, constraint, plan); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to publish ScalingAdvice: %w", err)

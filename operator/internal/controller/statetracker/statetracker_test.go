@@ -2,11 +2,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package clusterstate
+package statetracker
 
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gardener/scaling-advisor/api/planner"
 	"github.com/go-logr/logr"
@@ -27,7 +28,7 @@ func newTestBuilder() *ClusterStateTracker {
 
 func mustSnapshot(t *testing.T, b *ClusterStateTracker) planner.ClusterSnapshot {
 	t.Helper()
-	snap, err := b.Snapshot()
+	snap, err := b.Snapshot(time.Now())
 	if err != nil {
 		t.Fatalf("Snapshot() error = %v", err)
 	}
@@ -224,7 +225,7 @@ func TestSnapshotNotSyncedReturnsError(t *testing.T) {
 		log:   logr.Discard(),
 		state: newClusterState(),
 	}
-	if _, err := b.Snapshot(); !errors.Is(err, ErrNotSynced) {
+	if _, err := b.Snapshot(time.Now()); !errors.Is(err, ErrNotSynced) {
 		t.Errorf("Snapshot() error = %v, want ErrNotSynced", err)
 	}
 }
