@@ -71,6 +71,9 @@ func (s *simulatorMultiSim) doSimulate(ctx context.Context) (err error) {
 	if err = s.state.InitializeRequestView(ctx); err != nil {
 		return
 	}
+	if err = s.state.PrebindRequestView(ctx, s.schedulerLauncher); err != nil {
+		return
+	}
 	s.state.SimulationGroups, err = s.createAndGroupSimulations()
 	if err != nil {
 		return
@@ -250,6 +253,8 @@ func (s *simulatorMultiSim) processScaleOutSimResults(ctx context.Context, simul
 	var nodeScore plannerapi.NodeScore
 	log := logr.FromContextOrDiscard(ctx)
 	for _, sr := range scaleOutSimResults {
+		// TODO(scad-operator):Remove once upcoming-vs-candidate behavior is understood.
+		logSimAssignments(log, simulationGroupName, sr)
 		if len(sr.NodePodAssignments) == 0 {
 			log.V(2).Info("No NodePodAssignments for simulation, skipping NodeScoring", "simulationName", sr.Name)
 			continue
@@ -309,4 +314,41 @@ func validateSimulatorArgs(args plannerapi.SimulatorArgs) error {
 		return fmt.Errorf("%w: storage meta access is required", plannerapi.ErrCreateSimulator)
 	}
 	return nil
+}
+
+// logSimAssignments emits a compact summary of where pending pods landed in this simulation.
+// "candidate" = the freshly-introduced scale-out node; "other" = any node already in the
+// request view (real or upcoming).
+// TODO(scad-operator): remove once the upcoming-vs-candidate accounting is fixed in the
+// simulator
+func logSimAssignments(log logr.Logger, groupName string, sr plannerapi.ScaleOutSimResult) {
+	v := log.V(2)
+	if !v.Enabled() {
+		return
+	}
+	candidate := summarizeAssignments(sr.NodePodAssignments)
+	other := summarizeAssignments(sr.OtherNodePodAssignments)
+	leftover := make([]string, 0, len(sr.LeftoverUnscheduledPods))
+	for _, p := range sr.LeftoverUnscheduledPods {
+		leftover = append(leftover, p.String())
+	}
+	v.Info("simulation pod assignments",
+		"group", groupName,
+		"simulation", sr.Name,
+		"candidate", candidate,
+		"other", other,
+		"leftover", leftover,
+	)
+}
+
+func summarizeAssignments(assignments []plannerapi.NodePodAssignment) []string {
+	out := make([]string, 0, len(assignments))
+	for _, a := range assignments {
+		pods := make([]string, 0, len(a.ScheduledPods))
+		for _, p := range a.ScheduledPods {
+			pods = append(pods, p.String())
+		}
+		out = append(out, fmt.Sprintf("%s -> %v", a.NodeResources.Name, pods))
+	}
+	return out
 }

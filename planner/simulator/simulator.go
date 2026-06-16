@@ -36,18 +36,13 @@ func PopulateView(ctx context.Context, view minkapi.View, cs *plannerapi.Cluster
 			return err
 		}
 	}
-	for _, nodeInfo := range cs.Nodes {
-		createdObj, err := view.CreateObject(ctx, typeinfo.NodesDescriptor.GVK, nodeutil.AsNode(nodeInfo))
-		if err != nil {
-			return err
-		}
-		if nodeInfo.CSINodeSpec == nil {
-			continue
-		}
-		csiNode := nodeutil.NewCSINode(nodeInfo.Name, createdObj.GetUID(), *nodeInfo.CSINodeSpec)
-		if _, err = view.CreateObject(ctx, typeinfo.CSINodeDescriptor.GVK, csiNode); err != nil {
-			return err
-		}
+	if err := createNodeObjects(ctx, view, cs.Nodes); err != nil {
+		return err
+	}
+	// UpcomingNodes are part of cluster capacity; the simulator prebindsunscheduled pods against them in PrebindRequestView
+	// before introducing any candidate.
+	if err := createNodeObjects(ctx, view, cs.UpcomingNodes); err != nil {
+		return err
 	}
 	for _, pvc := range cs.PVCs {
 		if _, err := view.CreateObject(ctx, typeinfo.PersistentVolumeClaimsDescriptor.GVK, volutil.AsPVC(pvc)); err != nil {
@@ -61,6 +56,25 @@ func PopulateView(ctx context.Context, view minkapi.View, cs *plannerapi.Cluster
 	}
 	for _, pod := range cs.Pods {
 		if _, err := view.CreateObject(ctx, typeinfo.PodsDescriptor.GVK, podutil.AsPod(pod)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createNodeObjects writes a Node (and CSINode if specified) into the view for
+// each NodeInfo in nodes.
+func createNodeObjects(ctx context.Context, view minkapi.View, nodes []plannerapi.NodeInfo) error {
+	for _, nodeInfo := range nodes {
+		createdObj, err := view.CreateObject(ctx, typeinfo.NodesDescriptor.GVK, nodeutil.AsNode(nodeInfo))
+		if err != nil {
+			return err
+		}
+		if nodeInfo.CSINodeSpec == nil {
+			continue
+		}
+		csiNode := nodeutil.NewCSINode(nodeInfo.Name, createdObj.GetUID(), *nodeInfo.CSINodeSpec)
+		if _, err = view.CreateObject(ctx, typeinfo.CSINodeDescriptor.GVK, csiNode); err != nil {
 			return err
 		}
 	}

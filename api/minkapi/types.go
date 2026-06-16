@@ -118,6 +118,10 @@ type EventSink interface {
 	events.EventSink
 	// List returns all events in the sink.
 	List() []eventsv1.Event
+	// Drain atomically returns all events in the sink and clears it. Use when
+	// the caller needs to inspect events and reset in one step; List+Reset
+	// races against producers and silently drops events appended in the gap.
+	Drain() []eventsv1.Event
 }
 
 // View is the high-level facade to a repository of objects of different types (GVK).

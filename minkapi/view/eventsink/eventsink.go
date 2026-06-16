@@ -86,6 +86,18 @@ func (s *InMemEventSink) List() []eventsv1.Event {
 	return s.events
 }
 
+// Drain atomically returns the current events and clears the backing slice.
+// Callers that need to inspect events and reset cannot use List+Reset because
+// events appended by concurrent producers in the gap are silently dropped by
+// Reset.
+func (s *InMemEventSink) Drain() []eventsv1.Event {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := s.events
+	s.events = nil
+	return out
+}
+
 // Reset clears the backing in-memory slice.
 func (s *InMemEventSink) Reset() error {
 	s.mu.Lock()

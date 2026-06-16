@@ -90,6 +90,21 @@ func (s *SimulatorState) InitializeRequestView(ctx context.Context) error {
 	return nil
 }
 
+// PrebindRequestView runs the scheduler against the request view to bind unscheduled pods that fit on
+// existing real and upcoming nodes before any candidate scale-out node is introduced.
+// Must be called after InitializeRequestView and before any simulation sandbox view is forked off the request view,
+// so the bindings are inherited by every sandbox.
+func (s *SimulatorState) PrebindRequestView(ctx context.Context, schedulerLauncher plannerapi.SchedulerLauncher) error {
+	requestView := s.RequestView()
+	if requestView == nil {
+		return fmt.Errorf("prebind called before InitializeRequestView")
+	}
+	if err := prebindRequestView(ctx, requestView, &s.Request.Snapshot, schedulerLauncher, s.simConfig); err != nil {
+		return fmt.Errorf("prebind of request view failed: %w", err)
+	}
+	return nil
+}
+
 // CreateSandboxView creates a sandbox view with the given name from the given delegate view, adds the new view to
 // internal slice of views and returns the same.
 func (s *SimulatorState) CreateSandboxView(ctx context.Context, name string, delegate minkapi.View) (minkapi.View, error) {
