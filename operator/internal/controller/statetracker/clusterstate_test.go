@@ -13,152 +13,13 @@ import (
 	commontypes "github.com/gardener/scaling-advisor/api/common/types"
 	corev1alpha1 "github.com/gardener/scaling-advisor/api/core/v1alpha1"
 	"github.com/gardener/scaling-advisor/api/planner"
-	nodev1 "k8s.io/api/node/v1"
-	schedulingv1 "k8s.io/api/scheduling/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-// These tests exercise clusterState directly, independent of any informer/handler plumbing.
-// Handler-level coverage lives in statetracker_test.go.
-
-func podInfo(namespace, name string) planner.PodInfo {
-	return planner.PodInfo{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
-}
-
-func nodeInfo(name string) planner.NodeInfo {
-	return planner.NodeInfo{ObjectMeta: metav1.ObjectMeta{Name: name}}
-}
-
-func TestClusterStateUpsertDeletePod(t *testing.T) {
-	s := newClusterState()
-	key := commontypes.NamespacedName{Namespace: "ns", Name: "p"}
-
-	s.upsertPod(podInfo("ns", "p"))
-	if got := len(s.snapshot(time.Now()).Pods); got != 1 {
-		t.Fatalf("after upsert: pods = %d, want 1", got)
-	}
-
-	// Upsert with same key replaces, doesn't grow the map.
-	s.upsertPod(podInfo("ns", "p"))
-	if got := len(s.snapshot(time.Now()).Pods); got != 1 {
-		t.Fatalf("after second upsert: pods = %d, want 1", got)
-	}
-
-	s.deletePod(key)
-	if got := len(s.snapshot(time.Now()).Pods); got != 0 {
-		t.Fatalf("after delete: pods = %d, want 0", got)
-	}
-}
-
-func TestClusterStateUpsertDeleteNode(t *testing.T) {
-	s := newClusterState()
-	s.upsertNode(nodeInfo("node-a"))
-	s.upsertNode(nodeInfo("node-b"))
-	if got := len(s.snapshot(time.Now()).Nodes); got != 2 {
-		t.Fatalf("after two upserts: nodes = %d, want 2", got)
-	}
-	s.deleteNode("node-a")
-	if got := len(s.snapshot(time.Now()).Nodes); got != 1 {
-		t.Fatalf("after delete: nodes = %d, want 1", got)
-	}
-}
-
-func TestClusterStateUpsertDeletePVAndPVC(t *testing.T) {
-	s := newClusterState()
-	s.upsertPV(planner.PVInfo{ObjectMeta: metav1.ObjectMeta{Name: "pv-1"}})
-	s.upsertPVC(planner.PVCInfo{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pvc-1"}})
-	snap := s.snapshot(time.Now())
-	if len(snap.PVs) != 1 || len(snap.PVCs) != 1 {
-		t.Fatalf("PVs=%d PVCs=%d, want 1/1", len(snap.PVs), len(snap.PVCs))
-	}
-
-	s.deletePV("pv-1")
-	s.deletePVC(commontypes.NamespacedName{Namespace: "ns", Name: "pvc-1"})
-	snap = s.snapshot(time.Now())
-	if len(snap.PVs) != 0 || len(snap.PVCs) != 0 {
-		t.Fatalf("after delete: PVs=%d PVCs=%d, want 0/0", len(snap.PVs), len(snap.PVCs))
-	}
-}
-
-func TestClusterStateClassMutators(t *testing.T) {
-	s := newClusterState()
-
-	s.upsertStorageClass(storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "sc"}})
-	s.upsertPriorityClass(schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: "pc"}})
-	s.upsertRuntimeClass(nodev1.RuntimeClass{ObjectMeta: metav1.ObjectMeta{Name: "rc"}})
-
-	snap := s.snapshot(time.Now())
-	if got := len(snap.StorageClasses); got != 1 {
-		t.Fatalf("storageClasses = %d, want 1", got)
-	}
-	if got := len(snap.PriorityClasses); got != 1 {
-		t.Fatalf("priorityClasses = %d, want 1", got)
-	}
-	if got := len(snap.RuntimeClasses); got != 1 {
-		t.Fatalf("runtimeClasses = %d, want 1", got)
-	}
-
-	s.deleteStorageClass("sc")
-	s.deletePriorityClass("pc")
-	s.deleteRuntimeClass("rc")
-
-	snap = s.snapshot(time.Now())
-	if got := len(snap.StorageClasses); got != 0 {
-		t.Fatalf("after delete storageClasses = %d, want 0", got)
-	}
-	if got := len(snap.PriorityClasses); got != 0 {
-		t.Fatalf("after delete priorityClasses = %d, want 0", got)
-	}
-	if got := len(snap.RuntimeClasses); got != 0 {
-		t.Fatalf("after delete runtimeClasses = %d, want 0", got)
-	}
-}
-
-// TestSnapshotIsIndependent verifies that snapshot() returns slices not aliased to internal maps:
-// later mutations must not change a snapshot already handed out.
-func TestSnapshotIsIndependent(t *testing.T) {
-	s := newClusterState()
-	s.upsertPod(podInfo("ns", "p1"))
-
-	first := s.snapshot(time.Now())
-	s.upsertPod(podInfo("ns", "p2"))
-
-	if got := len(first.Pods); got != 1 {
-		t.Fatalf("first snapshot pods = %d, want 1 (snapshot aliased internal state)", got)
-	}
-	if got := len(s.snapshot(time.Now()).Pods); got != 2 {
-		t.Fatalf("second snapshot pods = %d, want 2", got)
-	}
-}
-
-// TestClusterStateConcurrentMutators is a smoke test for the RWMutex: many goroutines mutating and
-// snapshotting in parallel must not race or panic. Run with -race to exercise the guarantee.
-func TestClusterStateConcurrentMutators(t *testing.T) {
-	s := newClusterState()
-
-	const writers = 8
-	const writesPerGoroutine = 200
-	const reads = writers * writesPerGoroutine
-
-	var wg sync.WaitGroup
-	for id := range writers {
-		wg.Go(func() {
-			for j := range writesPerGoroutine {
-				name := fmt.Sprintf("n-%d-%d", id, j)
-				s.upsertNode(nodeInfo(name))
-				s.deleteNode(name)
-			}
-		})
-	}
-	wg.Go(func() {
-		for range reads {
-			_ = s.snapshot(time.Now())
-		}
-	})
-	wg.Wait()
-}
+// These tests exercise clusterState directly. Snapshot-level coverage (which
+// now reads from the data-plane cache rather than in-memory maps) lives in
+// statetracker_test.go.
 
 // upcomingFor builds a synthetic upcoming entry with the given placement and deadline.
 func upcomingFor(advUID types.UID, idx, replica int32, p corev1alpha1.NodePlacement, deadline time.Time) (upcomingKey, upcomingNode) {
@@ -171,7 +32,8 @@ func upcomingFor(advUID types.UID, idx, replica int32, p corev1alpha1.NodePlacem
 	}
 }
 
-func TestPruneExpiredAtSnapshot(t *testing.T) {
+
+func TestPruneExpiredAtUpcomingSnapshot(t *testing.T) {
 	s := newClusterState()
 	p := corev1alpha1.NodePlacement{PoolName: "p", TemplateName: "t", InstanceType: "m5", Region: "r", AvailabilityZone: "z"}
 	now := time.Now()
@@ -179,9 +41,9 @@ func TestPruneExpiredAtSnapshot(t *testing.T) {
 	k2, u2 := upcomingFor("u1", 0, 1, p, now.Add(time.Minute))
 	s.upcoming[k1], s.upcoming[k2] = u1, u2
 
-	snap := s.snapshot(time.Now())
-	if len(snap.UpcomingNodes) != 1 {
-		t.Fatalf("UpcomingNodes=%d, want 1", len(snap.UpcomingNodes))
+	got := s.upcomingSnapshot(now)
+	if len(got) != 1 {
+		t.Fatalf("upcomingSnapshot=%d, want 1", len(got))
 	}
 }
 
@@ -212,18 +74,21 @@ func TestRemoveUpcomingMatchingNoMatch(t *testing.T) {
 	}
 }
 
-func TestSnapshotUpcomingIndependent(t *testing.T) {
+func TestUpcomingSnapshotIndependent(t *testing.T) {
 	s := newClusterState()
 	p := corev1alpha1.NodePlacement{PoolName: "p", TemplateName: "t", InstanceType: "m5", Region: "r", AvailabilityZone: "z"}
 	k, u := upcomingFor("u1", 0, 0, p, time.Now().Add(time.Hour))
 	s.upcoming[k] = u
 
-	first := s.snapshot(time.Now())
+	first := s.upcomingSnapshot(time.Now())
 	k2, u2 := upcomingFor("u1", 0, 1, p, time.Now().Add(time.Hour))
 	s.upcoming[k2] = u2
 
-	if len(first.UpcomingNodes) != 1 {
-		t.Fatalf("first snapshot UpcomingNodes=%d, want 1", len(first.UpcomingNodes))
+	if len(first) != 1 {
+		t.Fatalf("first snapshot=%d, want 1", len(first))
+	}
+	if got := len(s.upcomingSnapshot(time.Now())); got != 2 {
+		t.Fatalf("second snapshot=%d, want 2", got)
 	}
 }
 
@@ -353,4 +218,31 @@ func TestIsLatestAdviceAcknowledged(t *testing.T) {
 	if !s.isLatestAdviceAcknowledged(ref) {
 		t.Fatal("acked advice should report acknowledged=true")
 	}
+}
+
+// TestClusterStateConcurrentMutators is a smoke test for the RWMutex: many
+// goroutines mutating advice/upcoming/seenNodes in parallel must not race or
+// panic. Run with -race to exercise the guarantee.
+func TestClusterStateConcurrentMutators(t *testing.T) {
+	s := newClusterState()
+	p := corev1alpha1.NodePlacement{PoolName: "p", TemplateName: "t", InstanceType: "m5", Region: "r", AvailabilityZone: "z"}
+
+	const writers = 8
+	const writesPerGoroutine = 200
+	const reads = writers * writesPerGoroutine
+
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Go(func() {
+			for range writesPerGoroutine {
+				s.removeUpcomingMatching(p)
+			}
+		})
+	}
+	wg.Go(func() {
+		for range reads {
+			_ = s.upcomingSnapshot(time.Now())
+		}
+	})
+	wg.Wait()
 }

@@ -100,7 +100,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	// Step 4: snapshot copy.
-	snap, err := r.csTracker.Snapshot(now)
+	snap, err := r.csTracker.Snapshot(ctx, now)
 	if err != nil {
 		if errors.Is(err, statetracker.ErrNotSynced) {
 			log.Info("waiting for cluster snapshot to sync; requeueing")

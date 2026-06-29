@@ -29,11 +29,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// ErrNotSynced is returned by Snapshot when the builder has not yet completed its initial cache sync.
+// ErrNotSynced is returned by Snapshot when the tracker has not yet completed its initial cache sync.
 var ErrNotSynced = errors.New("cluster snapshot not synced")
 
-// ClusterStateTracker watches the data-plane (pods/nodes/PVs/PVCs/SCs/PCs/RCs) for snapshot
-// and the control-plane for ScalingAdvice
+// dataPlaneKinds enumerates the data-plane kinds Snapshot lists. Their informers
+// are force-started in Start() so the cache actually populates them — only Node
+// has an event handler; the rest are read-only on the Snapshot path.
+var dataPlaneKinds = []client.Object{
+	&corev1.Pod{},
+	&corev1.Node{},
+	&corev1.PersistentVolume{},
+	&corev1.PersistentVolumeClaim{},
+	&storagev1.StorageClass{},
+	&schedulingv1.PriorityClass{},
+	&nodev1.RuntimeClass{},
+}
+
+// ClusterStateTracker serves a planner.ClusterSnapshot from the data-plane
+// cache (lister-backed informer store) and tracks advice-derived state from
+// the control-plane cache.
 type ClusterStateTracker struct {
 	log               logr.Logger
 	dataPlaneCache    cache.Cache
@@ -60,11 +74,53 @@ func (b *ClusterStateTracker) NeedLeaderElection() bool {
 	return false
 }
 
-func (b *ClusterStateTracker) Snapshot(now time.Time) (planner.ClusterSnapshot, error) {
+// Snapshot materialises a ClusterSnapshot by listing the data-plane cache.
+// Upcoming nodes are read from in-memory advice-derived state.
+func (b *ClusterStateTracker) Snapshot(ctx context.Context, now time.Time) (planner.ClusterSnapshot, error) {
 	if !b.synced.Load() {
 		return planner.ClusterSnapshot{}, ErrNotSynced
 	}
-	return b.state.snapshot(now), nil
+	var (
+		pods  corev1.PodList
+		nodes corev1.NodeList
+		pvs   corev1.PersistentVolumeList
+		pvcs  corev1.PersistentVolumeClaimList
+		scs   storagev1.StorageClassList
+		pcs   schedulingv1.PriorityClassList
+		rcs   nodev1.RuntimeClassList
+	)
+	for _, list := range []client.ObjectList{&pods, &nodes, &pvs, &pvcs, &scs, &pcs, &rcs} {
+		if err := b.dataPlaneCache.List(ctx, list); err != nil {
+			return planner.ClusterSnapshot{}, fmt.Errorf("cluster state tracker: list %T: %w", list, err)
+		}
+	}
+	snap := planner.ClusterSnapshot{
+		Pods:            make([]planner.PodInfo, 0, len(pods.Items)),
+		Nodes:           make([]planner.NodeInfo, 0, len(nodes.Items)),
+		PVs:             make([]planner.PVInfo, 0, len(pvs.Items)),
+		PVCs:            make([]planner.PVCInfo, 0, len(pvcs.Items)),
+		StorageClasses:  scs.Items,
+		PriorityClasses: pcs.Items,
+		RuntimeClasses:  rcs.Items,
+	}
+	for i := range pods.Items {
+		snap.Pods = append(snap.Pods, podutil.AsPodInfo(pods.Items[i]))
+	}
+	for i := range nodes.Items {
+		snap.Nodes = append(snap.Nodes, nodeutil.AsNodeInfo(nodes.Items[i]))
+	}
+	for i := range pvs.Items {
+		// Planner consumes only bound PVs.
+		if pvs.Items[i].Spec.ClaimRef == nil {
+			continue
+		}
+		snap.PVs = append(snap.PVs, volutil.AsPVInfo(pvs.Items[i]))
+	}
+	for i := range pvcs.Items {
+		snap.PVCs = append(snap.PVCs, volutil.AsPVCInfo(pvcs.Items[i]))
+	}
+	snap.UpcomingNodes = b.state.upcomingSnapshot(now)
+	return snap, nil
 }
 
 // FilterConstraint returns a deep-copy of in with backed-off NodePlacements removed.
@@ -78,11 +134,20 @@ func (b *ClusterStateTracker) IsLatestAdviceAcknowledged(ref commontypes.Namespa
 	return b.state.isLatestAdviceAcknowledged(ref)
 }
 
-// Start registers per-type handlers on each watched informer (across both caches),
-// waits for both caches to sync, and blocks until ctx is cancelled.
+// Start force-starts the data-plane informers we list from in Snapshot,
+// registers the Node and ScalingAdvice handlers, waits for both caches to
+// sync, and blocks until ctx is cancelled.
 func (b *ClusterStateTracker) Start(ctx context.Context) error {
 	b.log.Info("cluster state tracker starting")
-	defer b.log.Info("cluster state tracker stopped")
+
+	// The data-plane cache only begins watching a kind once GetInformer/List/Get
+	// is called for it. Trigger that here for every kind Snapshot lists; without
+	// this, the cache stays empty and Snapshot would block on first List.
+	for _, obj := range dataPlaneKinds {
+		if _, err := b.dataPlaneCache.GetInformer(ctx, obj); err != nil {
+			return fmt.Errorf("cluster state tracker: get informer for %T: %w", obj, err)
+		}
+	}
 
 	type watch struct {
 		c       cache.Cache
@@ -90,13 +155,7 @@ func (b *ClusterStateTracker) Start(ctx context.Context) error {
 		handler toolscache.ResourceEventHandler
 	}
 	watches := []watch{
-		{b.dataPlaneCache, &corev1.Pod{}, b.podHandler()},
 		{b.dataPlaneCache, &corev1.Node{}, b.nodeHandler()},
-		{b.dataPlaneCache, &corev1.PersistentVolume{}, b.pvHandler()},
-		{b.dataPlaneCache, &corev1.PersistentVolumeClaim{}, b.pvcHandler()},
-		{b.dataPlaneCache, &storagev1.StorageClass{}, b.storageClassHandler()},
-		{b.dataPlaneCache, &schedulingv1.PriorityClass{}, b.priorityClassHandler()},
-		{b.dataPlaneCache, &nodev1.RuntimeClass{}, b.runtimeClassHandler()},
 		{b.controlPlaneCache, &corev1alpha1.ScalingAdvice{}, b.adviceHandler()},
 	}
 	for _, w := range watches {
@@ -111,7 +170,7 @@ func (b *ClusterStateTracker) Start(ctx context.Context) error {
 		return fmt.Errorf("cluster state tracker: control-plane cache sync did not complete")
 	}
 	b.synced.Store(true)
-	b.log.V(2).Info("cluster state tracker ready", "watchedKinds", len(watches))
+	b.log.V(2).Info("cluster state tracker ready", "dataPlaneKinds", len(dataPlaneKinds), "handlers", len(watches))
 
 	<-ctx.Done()
 	return nil
@@ -129,59 +188,14 @@ func (b *ClusterStateTracker) registerHandler(ctx context.Context, c cache.Cache
 }
 
 // ---------------------------------------------------------------------------
-// Per-type handlers: each type-asserts the incoming object, projects
-// it via common/* helpers, and mutates clusterState.
+// Handlers: only Node (data-plane) and ScalingAdvice (control-plane).
+// All other data-plane kinds are read lazily from the cache in Snapshot.
 // ---------------------------------------------------------------------------
 
-func (b *ClusterStateTracker) podHandler() toolscache.ResourceEventHandler {
-	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			pod, ok := obj.(*corev1.Pod)
-			if !ok {
-				b.log.V(2).Info("podHandler.Add: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("pod added", "namespace", pod.Namespace, "name", pod.Name)
-			b.state.upsertPod(podutil.AsPodInfo(*pod))
-		},
-		UpdateFunc: func(_, newObj any) {
-			pod, ok := newObj.(*corev1.Pod)
-			if !ok {
-				b.log.V(2).Info("podHandler.Update: unexpected type", "type", fmt.Sprintf("%T", newObj))
-				return
-			}
-			b.log.V(4).Info("pod updated", "namespace", pod.Namespace, "name", pod.Name)
-			b.state.upsertPod(podutil.AsPodInfo(*pod))
-		},
-		DeleteFunc: func(obj any) {
-			pod, ok := tombstoneOrObject[*corev1.Pod](obj)
-			if !ok {
-				b.log.V(2).Info("podHandler.Delete: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("pod deleted", "namespace", pod.Namespace, "name", pod.Name)
-			b.state.deletePod(commontypes.NamespacedName{Namespace: pod.Namespace, Name: pod.Name})
-		},
-	}
-}
-
+// nodeHandler consumes an "upcoming" slot when a real node arrives matching a
+// synthesised placement. AddFunc is idempotent: removeUpcomingMatching is a
+// no-op once the slot is already consumed, so re-list re-delivery is harmless.
 func (b *ClusterStateTracker) nodeHandler() toolscache.ResourceEventHandler {
-	upsert := func(node *corev1.Node) {
-		ni := nodeutil.AsNodeInfo(*node)
-		// Only the first appearance of a node consumes an upcoming slot;
-		// subsequent updates (heartbeat, status, periodic resync) refresh the
-		// stored NodeInfo without touching upcoming.
-		firstSeen := b.state.upsertNode(ni)
-		if !firstSeen {
-			return
-		}
-		placement, err := ni.GetNodePlacement()
-		if err != nil {
-			b.log.V(4).Info("node missing required labels; not consuming any upcoming entry", "node", node.Name, "err", err)
-			return
-		}
-		b.state.removeUpcomingMatching(placement)
-	}
 	return toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			node, ok := obj.(*corev1.Node)
@@ -190,194 +204,13 @@ func (b *ClusterStateTracker) nodeHandler() toolscache.ResourceEventHandler {
 				return
 			}
 			b.log.V(4).Info("node added", "name", node.Name)
-			upsert(node)
-		},
-		UpdateFunc: func(_, newObj any) {
-			node, ok := newObj.(*corev1.Node)
-			if !ok {
-				b.log.V(2).Info("nodeHandler.Update: unexpected type", "type", fmt.Sprintf("%T", newObj))
+			ni := nodeutil.AsNodeInfo(*node)
+			placement, err := ni.GetNodePlacement()
+			if err != nil {
+				b.log.V(4).Info("node missing required labels; not consuming any upcoming entry", "node", node.Name, "err", err)
 				return
 			}
-			b.log.V(4).Info("node updated", "name", node.Name)
-			upsert(node)
-		},
-		DeleteFunc: func(obj any) {
-			node, ok := tombstoneOrObject[*corev1.Node](obj)
-			if !ok {
-				b.log.V(2).Info("nodeHandler.Delete: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("node deleted", "name", node.Name)
-			b.state.deleteNode(node.Name)
-		},
-	}
-}
-
-func (b *ClusterStateTracker) pvHandler() toolscache.ResourceEventHandler {
-	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			pv, ok := obj.(*corev1.PersistentVolume)
-			if !ok {
-				b.log.V(2).Info("pvHandler.Add: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("pv added", "name", pv.Name, "bound", pv.Spec.ClaimRef != nil)
-			// Planner only consumes bound PVs.
-			if pv.Spec.ClaimRef == nil {
-				return
-			}
-			b.state.upsertPV(volutil.AsPVInfo(*pv))
-		},
-		UpdateFunc: func(_, newObj any) {
-			pv, ok := newObj.(*corev1.PersistentVolume)
-			if !ok {
-				b.log.V(2).Info("pvHandler.Update: unexpected type", "type", fmt.Sprintf("%T", newObj))
-				return
-			}
-			b.log.V(4).Info("pv updated", "name", pv.Name, "bound", pv.Spec.ClaimRef != nil)
-			if pv.Spec.ClaimRef == nil {
-				// Transitioned out of bound (or never was). Evict if previously stored.
-				b.state.deletePV(pv.Name)
-				return
-			}
-			b.state.upsertPV(volutil.AsPVInfo(*pv))
-		},
-		DeleteFunc: func(obj any) {
-			pv, ok := tombstoneOrObject[*corev1.PersistentVolume](obj)
-			if !ok {
-				b.log.V(2).Info("pvHandler.Delete: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("pv deleted", "name", pv.Name)
-			b.state.deletePV(pv.Name)
-		},
-	}
-}
-
-func (b *ClusterStateTracker) pvcHandler() toolscache.ResourceEventHandler {
-	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			pvc, ok := obj.(*corev1.PersistentVolumeClaim)
-			if !ok {
-				b.log.V(2).Info("pvcHandler.Add: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("pvc added", "namespace", pvc.Namespace, "name", pvc.Name)
-			b.state.upsertPVC(volutil.AsPVCInfo(*pvc))
-		},
-		UpdateFunc: func(_, newObj any) {
-			pvc, ok := newObj.(*corev1.PersistentVolumeClaim)
-			if !ok {
-				b.log.V(2).Info("pvcHandler.Update: unexpected type", "type", fmt.Sprintf("%T", newObj))
-				return
-			}
-			b.log.V(4).Info("pvc updated", "namespace", pvc.Namespace, "name", pvc.Name)
-			b.state.upsertPVC(volutil.AsPVCInfo(*pvc))
-		},
-		DeleteFunc: func(obj any) {
-			pvc, ok := tombstoneOrObject[*corev1.PersistentVolumeClaim](obj)
-			if !ok {
-				b.log.V(2).Info("pvcHandler.Delete: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("pvc deleted", "namespace", pvc.Namespace, "name", pvc.Name)
-			b.state.deletePVC(commontypes.NamespacedName{Namespace: pvc.Namespace, Name: pvc.Name})
-		},
-	}
-}
-
-func (b *ClusterStateTracker) storageClassHandler() toolscache.ResourceEventHandler {
-	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			sc, ok := obj.(*storagev1.StorageClass)
-			if !ok {
-				b.log.V(2).Info("storageClassHandler.Add: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("storageclass added", "name", sc.Name)
-			b.state.upsertStorageClass(*sc.DeepCopy())
-		},
-		UpdateFunc: func(_, newObj any) {
-			sc, ok := newObj.(*storagev1.StorageClass)
-			if !ok {
-				b.log.V(2).Info("storageClassHandler.Update: unexpected type", "type", fmt.Sprintf("%T", newObj))
-				return
-			}
-			b.log.V(4).Info("storageclass updated", "name", sc.Name)
-			b.state.upsertStorageClass(*sc.DeepCopy())
-		},
-		DeleteFunc: func(obj any) {
-			sc, ok := tombstoneOrObject[*storagev1.StorageClass](obj)
-			if !ok {
-				b.log.V(2).Info("storageClassHandler.Delete: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("storageclass deleted", "name", sc.Name)
-			b.state.deleteStorageClass(sc.Name)
-		},
-	}
-}
-
-func (b *ClusterStateTracker) priorityClassHandler() toolscache.ResourceEventHandler {
-	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			pc, ok := obj.(*schedulingv1.PriorityClass)
-			if !ok {
-				b.log.V(2).Info("priorityClassHandler.Add: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("priorityclass added", "name", pc.Name)
-			b.state.upsertPriorityClass(*pc.DeepCopy())
-		},
-		UpdateFunc: func(_, newObj any) {
-			pc, ok := newObj.(*schedulingv1.PriorityClass)
-			if !ok {
-				b.log.V(2).Info("priorityClassHandler.Update: unexpected type", "type", fmt.Sprintf("%T", newObj))
-				return
-			}
-			b.log.V(4).Info("priorityclass updated", "name", pc.Name)
-			b.state.upsertPriorityClass(*pc.DeepCopy())
-		},
-		DeleteFunc: func(obj any) {
-			pc, ok := tombstoneOrObject[*schedulingv1.PriorityClass](obj)
-			if !ok {
-				b.log.V(2).Info("priorityClassHandler.Delete: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("priorityclass deleted", "name", pc.Name)
-			b.state.deletePriorityClass(pc.Name)
-		},
-	}
-}
-
-func (b *ClusterStateTracker) runtimeClassHandler() toolscache.ResourceEventHandler {
-	return toolscache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			rc, ok := obj.(*nodev1.RuntimeClass)
-			if !ok {
-				b.log.V(2).Info("runtimeClassHandler.Add: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("runtimeclass added", "name", rc.Name)
-			b.state.upsertRuntimeClass(*rc.DeepCopy())
-		},
-		UpdateFunc: func(_, newObj any) {
-			rc, ok := newObj.(*nodev1.RuntimeClass)
-			if !ok {
-				b.log.V(2).Info("runtimeClassHandler.Update: unexpected type", "type", fmt.Sprintf("%T", newObj))
-				return
-			}
-			b.log.V(4).Info("runtimeclass updated", "name", rc.Name)
-			b.state.upsertRuntimeClass(*rc.DeepCopy())
-		},
-		DeleteFunc: func(obj any) {
-			rc, ok := tombstoneOrObject[*nodev1.RuntimeClass](obj)
-			if !ok {
-				b.log.V(2).Info("runtimeClassHandler.Delete: unexpected type", "type", fmt.Sprintf("%T", obj))
-				return
-			}
-			b.log.V(4).Info("runtimeclass deleted", "name", rc.Name)
-			b.state.deleteRuntimeClass(rc.Name)
+			b.state.removeUpcomingMatching(placement)
 		},
 	}
 }
